@@ -336,10 +336,11 @@ public class ReportGenerator
         sb.AppendLine("## 输出要求");
         sb.AppendLine("请生成修改后的报表定义，包含以下字段的 JSON 对象:");
         sb.AppendLine("- report: ReportDefinition 对象");
-        sb.AppendLine("- pages: PageDefinition 数组（可选，如果不需要修改布局可省略）");
-        sb.AppendLine("- queries: QueryDefinition 数组（可选，如果不需要修改查询可省略）");
+        sb.AppendLine("- pages: PageDefinition 数组（当需要重新布局、重新设计或调整组件时必须返回完整数组）");
+        sb.AppendLine("- queries: QueryDefinition 数组（如未修改查询可省略，但不要重命名或替换已有查询 ID）");
         sb.AppendLine("- message: 修改说明字符串");
         sb.AppendLine();
+        sb.AppendLine("优先复用当前上下文中的 query id 和 component id；如果当前上下文已经是素材草稿，请将它设计成可交付的最终版式，而不是简单平铺。");
         sb.AppendLine("只修改用户明确要求的部分，保持其他部分不变。");
 
         return sb.ToString();
@@ -583,6 +584,9 @@ public static class SystemPrompts
            - 删除不需要的组件
            - 修改标题和标签
            - 调整配色方案
+        5. 如果当前上下文已经包含数据集素材草稿，你的职责是把它设计成真正可展示的成品报表，不要只是维持平均平铺
+        6. 保留现有 query id；除非用户明确要求，否则不要新增或重命名查询
+        7. 优先保留现有 component id；你可以调整位置、大小、类型和 config
 
         可用组件类型:
         - echarts: ECharts 图表，支持 line, bar, pie, area 等类型
@@ -599,6 +603,7 @@ public static class SystemPrompts
           "message": "修改说明"
         }
 
-        如果不需要修改 pages 或 queries，可以省略这些字段。
+        当任务要求重新设计版式、根据素材生成报表、自动排版或优化布局时，必须返回完整的 pages 数组。
+        如果不需要修改 queries，可以省略该字段，但不要输出与现有 query id 不匹配的 queryRef。
         """;
 }

@@ -2849,18 +2849,23 @@ export function App() {
     }));
   };
 
-  const createReportFromDatasetAssets = (
+  type DatasetAssetDraft = {
+    report: ReportDefinition;
+    pages: PageDefinition[];
+    queries: QueryDefinition[];
+    renderedSummaryMap: Map<string, { queryId: string; componentId: string }>;
+  };
+
+  const buildDraftReportFromDatasetAssets = (
     datasetAssets: ImportSummaryItem[],
     options?: {
       reportName?: string;
       reportDescription?: string;
       generationMode?: ReportDefinition['generationMode'];
-      completionMessage?: string;
     }
-  ) => {
+  ): DatasetAssetDraft | null => {
     if (datasetAssets.length === 0) {
-      setGenerationProgress('当前没有可用于自动创建报表的可见数据集素材。');
-      return false;
+      return null;
     }
 
     const reportId = `report-${Date.now()}`;
@@ -2951,61 +2956,293 @@ export function App() {
     });
 
     if (newComponents.length === 0 || newQueries.length === 0) {
-      setGenerationProgress('可见素材缺少可执行查询，无法自动创建报表。');
-      return false;
+      return null;
     }
 
     const reportName = options?.reportName?.trim()
       || `${modelMetadata?.databaseName || '数据模型'} 自动报表`;
     const reportDescription = options?.reportDescription?.trim()
-      || `基于 ${datasetAssets.length} 个可见数据集素材自动创建`;
+      || `基于 ${datasetAssets.length} 个可见数据集素材生成的报表草稿`;
 
-    setGeneratedReport({
-      formatVersion: '1.0.0',
-      id: reportId,
-      name: reportName,
-      description: reportDescription,
-      createdAt: new Date().toISOString(),
-      modifiedAt: new Date().toISOString(),
-      generationMode: options?.generationMode || 'imported',
-      pages: [pageId],
-      defaultPage: pageId,
-    });
-    setGeneratedPages([{
-      id: pageId,
-      name: '自动生成页面',
-      layout: {
-        type: 'grid',
-        columns: 12,
-        rowHeight: 60,
-        gap: 16,
-        padding: 24,
+    return {
+      report: {
+        formatVersion: '1.0.0',
+        id: reportId,
+        name: reportName,
+        description: reportDescription,
+        createdAt: new Date().toISOString(),
+        modifiedAt: new Date().toISOString(),
+        generationMode: options?.generationMode || 'imported',
+        pages: [pageId],
+        defaultPage: pageId,
       },
-      filters: [],
-      components: newComponents,
-    }]);
-    setGeneratedQueries(newQueries);
-    setImportSummary((previous) => previous.map((item) => {
-      const rendered = renderedSummaryMap.get(item.id);
-      return rendered
-        ? {
-          ...item,
-          queryId: rendered.queryId,
-          componentId: rendered.componentId,
-          isRendered: true,
-        }
-        : item;
-    }));
-    setActiveImportedComponentId(newComponents[0]?.id);
-    setWorkspaceMode('report');
-    setShowRightPane(true);
-    setGenerationProgress(
-      options?.completionMessage || `已根据 ${datasetAssets.length} 个可见素材创建报表，生成 ${newComponents.length} 个组件。`
-    );
-    return true;
+      pages: [{
+        id: pageId,
+        name: '素材草稿页面',
+        layout: {
+          type: 'grid',
+          columns: 12,
+          rowHeight: 60,
+          gap: 16,
+          padding: 24,
+        },
+        filters: [],
+        components: newComponents,
+      }],
+      queries: newQueries,
+      renderedSummaryMap,
+    };
   };
 
-  // Generate report directly from visible dataset assets.
+  const buildAssetDrivenPrompt = (
+    datasetAssets: ImportSummaryItem[],
+    draft: DatasetAssetDraft,
+    mode: 'model' | 'asset'
+  ): string => {
+    const lines: string[] = [];
+    const intent = userPrompt.trim() || '请自动设计一份美观、专业、具有清晰信息层级的 Power BI 风格报表。';
+
+    lines.push('请基于当前上下文中的现有数据集素材和查询，重新设计成真正可交付的 BI 报表。');
+    lines.push(`触发来源: ${mode === 'model' ? '从模型生成' : '从素材生成'}`);
+    lines.push(`用户目标: ${intent}`);
+    lines.push('');
+    lines.push('必须遵守的约束:');
+    lines.push('1. 只能使用 currentContext 中已有的 queries 作为数据来源，不要新增查询，不要修改 query id。');
+    lines.push('2. 优先复用 currentContext 中已有的组件 id；可以调整 type、title、config、position。');
+    lines.push('3. 需要返回完整的 report 和完整的 pages 数组，不能只返回说明文字。');
+    lines.push('4. 不要简单平均平铺，要通过主次层级、留白、分组、对齐和尺寸变化做出专业版式。');
+    lines.push('5. 优先使用全部可见素材；如果有次要素材，可以缩小或放到下方，但不要无故丢失。');
+    lines.push('6. 页面仍然使用 12 列网格系统。');
+    lines.push('');
+    lines.push('当前可见素材清单:');
+    datasetAssets.forEach((item, idx) => {
+      const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
+      const rendered = draft.renderedSummaryMap.get(item.id);
+      const visibleFields = item.fields.filter((field) => field.isVisible).map((field) => field.name);
+      lines.push(`${idx + 1}. 数据集: ${item.name}`);
+      lines.push(`   queryId: ${rendered?.queryId || item.queryId || `query-${item.id}`}`);
+      lines.push(`   componentId: ${rendered?.componentId || item.componentId || `component-${item.id}`}`);
+      lines.push(`   推荐图表: ${visibleChart?.chartType || item.type}`);
+      lines.push(`   行数: ${item.rowCount}, 评分: ${item.score.toFixed(1)}, 执行时间: ${item.executionTime.toFixed(0)}ms`);
+      lines.push(`   可见字段: ${visibleFields.join(', ') || '无'}`);
+      lines.push('');
+    });
+    lines.push('请输出修改后的完整 JSON，用于直接渲染最终报表。');
+
+    return lines.join('\n');
+  };
+
+  const applyAiDesignedAssetReport = (
+    draft: DatasetAssetDraft,
+    report: ReportDefinition,
+    pages: PageDefinition[],
+    completionMessage: string
+  ) => {
+    const validQueryIds = new Set(draft.queries.map((query) => query.id));
+    const draftComponentQueryMap = new Map(
+      draft.pages.flatMap((page) => page.components)
+        .filter((component) => component.queryRef)
+        .map((component) => [component.id, component.queryRef as string])
+    );
+    const invalidBindings: string[] = [];
+
+    const normalizedPages = pages.map((page) => ({
+      ...page,
+      components: page.components.map((component) => {
+        if (!component.queryRef) {
+          return component;
+        }
+        if (validQueryIds.has(component.queryRef)) {
+          return component;
+        }
+
+        const fallbackQueryRef = draftComponentQueryMap.get(component.id);
+        if (fallbackQueryRef && validQueryIds.has(fallbackQueryRef)) {
+          return {
+            ...component,
+            queryRef: fallbackQueryRef,
+          };
+        }
+
+        invalidBindings.push(`${page.id}/${component.id}:${component.queryRef}`);
+        return component;
+      }),
+    }));
+
+    if (invalidBindings.length > 0) {
+      throw new Error(`AI 返回了无法绑定现有素材查询的组件: ${invalidBindings.join(', ')}`);
+    }
+
+    const allComponents = normalizedPages.flatMap((page) => page.components);
+    const componentByQueryId = new Map(
+      allComponents
+        .filter((component) => component.queryRef)
+        .map((component) => [component.queryRef as string, component.id])
+    );
+    const availableComponentIds = new Set(allComponents.map((component) => component.id));
+    const defaultPageId = report.defaultPage && normalizedPages.some((page) => page.id === report.defaultPage)
+      ? report.defaultPage
+      : normalizedPages[0]?.id;
+
+    setGeneratedReport({
+      ...report,
+      pages: normalizedPages.map((page) => page.id),
+      defaultPage: defaultPageId,
+      modifiedAt: new Date().toISOString(),
+      generationMode: 'ai-generated',
+    });
+    setGeneratedPages(normalizedPages);
+    setGeneratedQueries(draft.queries);
+    setImportSummary((previous) => previous.map((item) => {
+      const rendered = draft.renderedSummaryMap.get(item.id);
+      if (!rendered) {
+        return item;
+      }
+
+      const nextComponentId = componentByQueryId.get(rendered.queryId) || rendered.componentId;
+      return {
+        ...item,
+        queryId: rendered.queryId,
+        componentId: nextComponentId,
+        isRendered: componentByQueryId.has(rendered.queryId) || availableComponentIds.has(nextComponentId),
+      };
+    }));
+    setActiveImportedComponentId(allComponents[0]?.id);
+    setWorkspaceMode('report');
+    setShowRightPane(true);
+    setGenerationProgress(completionMessage);
+  };
+
+  const generateReportWithAiFromDatasetAssets = async (
+    datasetAssets: ImportSummaryItem[],
+    mode: 'model' | 'asset'
+  ) => {
+    if (!apiUrl) {
+      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
+      return;
+    }
+
+    if (!isConnected) {
+      setGenerationProgress('请先连接模型，再使用 AI 生成。');
+      return;
+    }
+
+    const apiKey = localStorage.getItem('vibeBiAiApiKey');
+    if (!apiKey) {
+      setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
+      handleOpenSettings();
+      return;
+    }
+
+    const draft = buildDraftReportFromDatasetAssets(datasetAssets, {
+      reportName: `${modelMetadata?.databaseName || '数据模型'} ${mode === 'model' ? 'AI 生成草稿' : '素材草稿'}`,
+      reportDescription: `等待 AI 基于 ${datasetAssets.length} 个可见素材完成设计`,
+      generationMode: 'imported',
+    });
+
+    if (!draft) {
+      setGenerationProgress('可见素材缺少可执行查询，无法作为 AI 设计输入。');
+      return;
+    }
+
+    setIsGenerating(true);
+    setGenerationProgress(`正在调用 AI 基于 ${datasetAssets.length} 个可见素材设计报表...`);
+
+    try {
+      const response = await fetch(`${apiUrl}/api/ai/refine`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
+          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
+        },
+        body: JSON.stringify({
+          connectionString: buildModelConnectionString(),
+          userPrompt: buildAssetDrivenPrompt(datasetAssets, draft, mode),
+          currentContext: {
+            report: draft.report,
+            pages: draft.pages,
+            queries: draft.queries,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`生成请求失败: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error('无法读取响应流');
+      }
+
+      let applied = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) {
+            continue;
+          }
+
+          const json = line.substring(6);
+          let progress: {
+            step?: string;
+            message?: string;
+            report?: ReportDefinition;
+            pages?: PageDefinition[];
+          };
+
+          try {
+            progress = JSON.parse(json);
+          } catch {
+            continue;
+          }
+
+          if (progress.message || progress.step) {
+            setGenerationProgress(progress.message || progress.step || '');
+          }
+
+          if (progress.step === 'error') {
+            throw new Error(progress.message || 'AI 设计失败');
+          }
+
+          if (progress.step === 'complete') {
+            if (!progress.report || !Array.isArray(progress.pages) || progress.pages.length === 0) {
+              throw new Error('AI 已返回完成状态，但没有给出可用的页面布局。');
+            }
+
+            applyAiDesignedAssetReport(
+              draft,
+              progress.report,
+              progress.pages,
+              progress.message || `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`
+            );
+            applied = true;
+          }
+        }
+      }
+
+      if (!applied) {
+        throw new Error('AI 未返回可用于渲染的最终报表。');
+      }
+    } catch (err) {
+      setGenerationProgress(`AI 设计失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleAiGenerateFromImport = async () => {
     const importableVisuals = importSummary.filter((item) => (
       item.isVisible
@@ -3024,21 +3261,7 @@ export function App() {
       return;
     }
 
-    setIsGenerating(true);
-    setGenerationProgress('正在根据当前可见素材创建报表...');
-
-    try {
-      createReportFromDatasetAssets(importableVisuals, {
-        reportName: `${modelMetadata?.databaseName || '数据视图'} 素材报表`,
-        reportDescription: `基于 ${importableVisuals.length} 个可见素材自动排版生成`,
-        generationMode: 'imported',
-        completionMessage: `已根据 ${importableVisuals.length} 个可见素材自动创建报表。`,
-      });
-    } catch (err) {
-      setGenerationProgress(`生成失败: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setIsGenerating(false);
-    }
+    await generateReportWithAiFromDatasetAssets(importableVisuals, 'asset');
   };
 
   // Disconnect
@@ -3228,23 +3451,7 @@ export function App() {
     setShowRightPane(true);
 
     if (visibleDatasetAssets.length > 0) {
-      setIsGenerating(true);
-      setGenerationProgress('检测到数据视图中已有可见素材，正在自动创建报表...');
-
-      try {
-        const reportName = userPrompt.trim()
-          ? `${modelMetadata?.databaseName || '模型'}: ${userPrompt.trim().slice(0, 24)}${userPrompt.trim().length > 24 ? '...' : ''}`
-          : `${modelMetadata?.databaseName || '模型'} 自动报表`;
-        createReportFromDatasetAssets(visibleDatasetAssets, {
-          reportName,
-          reportDescription: `优先基于数据视图中的 ${visibleDatasetAssets.length} 个可见素材自动创建`,
-          generationMode: 'ai-generated',
-          completionMessage: `已根据数据视图中的 ${visibleDatasetAssets.length} 个可见素材自动创建报表。`,
-        });
-      } finally {
-        setIsGenerating(false);
-      }
-
+      await generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'model');
       return;
     }
 
@@ -4631,7 +4838,7 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
               label={isGenerating ? '生成中...' : '从模型生成'}
-              description="优先根据数据视图中的可见素材自动创建报表，无素材时再按模型和提示词生成"
+              description="优先基于可见素材交给 AI 设计报表，无素材时再按模型和提示词生成"
               onClick={() => {
                 setWorkspaceMode('report');
                 setActiveLeftPaneSection('ai');
@@ -4645,7 +4852,7 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('visual-library', '#7DD3FC', '#3B82F6')}
               label="从素材生成"
-              description="仅使用当前可见素材库直接自动排版生成"
+              description="将当前可见素材库交给 AI 自动设计和排版"
               onClick={() => { void handleAiGenerateFromImport(); }}
               disabled={isGenerating || importableVisualCount === 0}
               showDescription={false}
