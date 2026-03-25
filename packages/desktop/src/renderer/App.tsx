@@ -6,11 +6,9 @@ import {
   InfoPill,
   PaneCard,
   PaneSurface,
-  PaneTabs,
   RibbonBar,
   RibbonGroup,
   RibbonTabs,
-  RightPaneSurface,
   SideRail,
   WorkspaceHeader,
   WorkspaceLayout,
@@ -51,25 +49,6 @@ const sampleTheme: ThemeDefinition = {
       padding: 18,
     },
   },
-};
-
-// Mock data for testing without actual AS connection
-const mockData: Record<string, unknown[]> = {
-  q1: [{ revenue: 1250000 }],
-  q2: [
-    { month: '1月', value: 98000 },
-    { month: '2月', value: 112000 },
-    { month: '3月', value: 105000 },
-    { month: '4月', value: 128000 },
-    { month: '5月', value: 135000 },
-    { month: '6月', value: 142000 },
-  ],
-  q3: [
-    { category: '电子产品', value: 450000 },
-    { category: '服装', value: 320000 },
-    { category: '食品', value: 280000 },
-    { category: '家居', value: 200000 },
-  ],
 };
 
 const sampleDataSource: DataSourceConfig = {
@@ -114,7 +93,6 @@ type QueryRow = Record<string, unknown>;
 type RibbonTabId = 'home' | 'dataset' | 'ai' | 'view';
 type WorkspaceRailId = WorkspaceMode;
 type LeftPaneSectionId = 'start' | 'import' | 'ai' | 'model';
-type RightPaneTabId = 'visuals' | 'fields' | 'properties';
 type PowerBiScanItem = {
   id: string;
   processId: number;
@@ -124,6 +102,56 @@ type PowerBiScanItem = {
   label: string;
 };
 type DatasetDialogMode = 'import-json' | 'custom-dax' | 'query-builder';
+type AiProgressPayload = {
+  step?: string;
+  message?: string;
+  report?: ReportDefinition;
+  pages?: PageDefinition[];
+  queries?: QueryDefinition[];
+};
+type RawAiProgressPayload = AiProgressPayload & {
+  Step?: string;
+  Message?: string;
+  Report?: ReportDefinition;
+  Pages?: PageDefinition[];
+  Queries?: QueryDefinition[];
+};
+
+const defaultGenerationPrompt = '请自动设计一份美观、专业、具有清晰信息层级的 Power BI 风格报表。';
+
+function normalizeAiProgressPayload(raw: unknown): AiProgressPayload | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const payload = raw as RawAiProgressPayload;
+  const pages = Array.isArray(payload.pages)
+    ? payload.pages
+    : Array.isArray(payload.Pages)
+      ? payload.Pages
+      : undefined;
+  const queries = Array.isArray(payload.queries)
+    ? payload.queries
+    : Array.isArray(payload.Queries)
+      ? payload.Queries
+      : undefined;
+
+  return {
+    step: typeof payload.step === 'string' ? payload.step : typeof payload.Step === 'string' ? payload.Step : undefined,
+    message: typeof payload.message === 'string' ? payload.message : typeof payload.Message === 'string' ? payload.Message : undefined,
+    report: payload.report ?? payload.Report,
+    pages,
+    queries,
+  };
+}
+
+function parseAiProgressPayload(json: string): AiProgressPayload | null {
+  try {
+    return normalizeAiProgressPayload(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
 
 function quoteDaxString(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -1482,7 +1510,7 @@ export function App() {
   const [showConnectDialog, setShowConnectDialog] = useState(false);
 
   // AI Generation state
-  const [userPrompt, setUserPrompt] = useState<string>('请先基于当前模型和可见素材，自主设计一版专业、美观、信息层级清晰的 BI 报表。生成完成后，我会基于结果自动生成可编辑的修改提示词。');
+  const [userPrompt, setUserPrompt] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<string>('');
   const [generatedReport, setGeneratedReport] = useState<ReportDefinition | null>(null);
@@ -1525,7 +1553,6 @@ export function App() {
   const [activeRibbonTab, setActiveRibbonTab] = useState<RibbonTabId>('home');
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('report');
   const [activeLeftPaneSection, setActiveLeftPaneSection] = useState<LeftPaneSectionId>('start');
-  const [activeRightPaneTab, setActiveRightPaneTab] = useState<RightPaneTabId>('properties');
   const [showLeftPane] = useState(true);
   const [showRightPane, setShowRightPane] = useState(true);
   const [isRibbonCollapsed, setIsRibbonCollapsed] = useState(false);
@@ -1874,7 +1901,7 @@ export function App() {
       setModelMetadata(metadata);
       setIsConnected(true);
       setShowRightPane(true);
-      setActiveRightPaneTab('fields');
+      setActiveLeftPaneSection('model');
       setShowConnectDialog(false);
     } catch (err) {
       setConnectionError(err instanceof Error ? err.message : String(err));
@@ -3030,7 +3057,7 @@ export function App() {
     mode: 'model' | 'asset'
   ): string => {
     const lines: string[] = [];
-    const intent = userPrompt.trim() || '请自动设计一份美观、专业、具有清晰信息层级的 Power BI 风格报表。';
+    const intent = userPrompt.trim() || defaultGenerationPrompt;
 
     lines.push('请基于当前上下文中的现有数据集素材和查询，重新设计成真正可交付的 BI 报表。');
     lines.push(`触发来源: ${mode === 'model' ? '从模型生成' : '从素材生成'}`);
@@ -3212,16 +3239,8 @@ export function App() {
       let applied = false;
 
       for await (const json of readSseDataLines(reader)) {
-        let progress: {
-          step?: string;
-          message?: string;
-          report?: ReportDefinition;
-          pages?: PageDefinition[];
-        };
-
-        try {
-          progress = JSON.parse(json);
-        } catch {
+        const progress = parseAiProgressPayload(json);
+        if (!progress) {
           continue;
         }
 
@@ -3299,7 +3318,6 @@ export function App() {
     setActiveRibbonTab('home');
     setWorkspaceMode('report');
     setActiveLeftPaneSection('start');
-    setActiveRightPaneTab('properties');
     setShowRightPane(true);
     setChatMessages([]);
     setShowChatPanel(false);
@@ -3365,7 +3383,6 @@ export function App() {
     }
   };
 
-  // Send message to AI for refinement
   const handleSendChatMessage = async () => {
     if (!apiUrl || !isConnected || !chatInput.trim() || isRefining) return;
 
@@ -3385,7 +3402,6 @@ export function App() {
     setIsRefining(true);
 
     try {
-      // Build context from current report
       const context = {
         report: currentReport,
         pages: currentPages,
@@ -3412,7 +3428,6 @@ export function App() {
       }
 
       const reader = response.body?.getReader();
-
       if (!reader) {
         throw new Error('无法读取响应流');
       }
@@ -3420,25 +3435,24 @@ export function App() {
       let assistantMessage = '';
 
       for await (const json of readSseDataLines(reader)) {
-        try {
-          const progress = JSON.parse(json);
+        const progress = parseAiProgressPayload(json);
+        if (!progress) {
+          continue;
+        }
 
-          if (progress.step === 'complete' && progress.report) {
-            const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
-            const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
+        if (progress.step === 'complete' && progress.report) {
+          const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
+          const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
 
-            setGeneratedReport(progress.report);
-            setGeneratedPages(nextPages);
-            setGeneratedQueries(nextQueries);
-            setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
-            assistantMessage = progress.message || '报表已更新';
-          } else if (progress.step === 'error') {
-            assistantMessage = `错误: ${progress.message}`;
-          } else {
-            assistantMessage = progress.message || progress.step;
-          }
-        } catch {
-          // Ignore parse errors
+          setGeneratedReport(progress.report);
+          setGeneratedPages(nextPages);
+          setGeneratedQueries(nextQueries);
+          setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
+          assistantMessage = progress.message || '报表已更新';
+        } else if (progress.step === 'error') {
+          assistantMessage = `错误: ${progress.message}`;
+        } else {
+          assistantMessage = progress.message || progress.step || assistantMessage;
         }
       }
 
@@ -3480,17 +3494,14 @@ export function App() {
       return;
     }
 
-    if (!userPrompt.trim()) {
-      setGenerationProgress('请先输入提示词。');
-      return;
-    }
-
     const apiKey = localStorage.getItem('vibeBiAiApiKey');
     if (!apiKey) {
       setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
       handleOpenSettings();
       return;
     }
+
+    const prompt = userPrompt.trim() || defaultGenerationPrompt;
 
     setIsGenerating(true);
     setGenerationProgress('开始生成报表...');
@@ -3506,7 +3517,7 @@ export function App() {
         },
         body: JSON.stringify({
           connectionString: buildModelConnectionString(),
-          userPrompt,
+          userPrompt: prompt,
           pageCount: 1,
         }),
       });
@@ -3522,32 +3533,32 @@ export function App() {
       }
 
       for await (const json of readSseDataLines(reader)) {
-        try {
-          const progress = JSON.parse(json);
-          setGenerationProgress(progress.message || progress.step);
+        const progress = parseAiProgressPayload(json);
+        if (!progress) {
+          continue;
+        }
 
-          if (progress.step === 'complete' && progress.report) {
-            const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
-            const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
+        setGenerationProgress(progress.message || progress.step || '');
 
-            if (nextPages.length === 0) {
-              setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
-              continue;
-            }
+        if (progress.step === 'complete' && progress.report) {
+          const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
+          const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
 
-            setGeneratedReport(progress.report);
-            setGeneratedPages(nextPages);
-            setGeneratedQueries(nextQueries);
-            setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
-            setActiveImportedComponentId(undefined);
-            setGenerationProgress(
-              progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
-            );
-          } else if (progress.step === 'error') {
-            setGenerationProgress(`错误: ${progress.message}`);
+          if (nextPages.length === 0) {
+            setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
+            continue;
           }
-        } catch {
-          // Ignore parse errors
+
+          setGeneratedReport(progress.report);
+          setGeneratedPages(nextPages);
+          setGeneratedQueries(nextQueries);
+          setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
+          setActiveImportedComponentId(undefined);
+          setGenerationProgress(
+            progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
+          );
+        } else if (progress.step === 'error') {
+          setGenerationProgress(`错误: ${progress.message}`);
         }
       }
     } catch (err) {
@@ -3561,8 +3572,8 @@ export function App() {
   const currentReport = generatedReport;
   const currentPages = generatedPages.length > 0 ? generatedPages : [];
   const currentQueries = generatedQueries.length > 0 ? generatedQueries : [];
-  const availableTables = modelMetadata?.tables || [];
   const queryBuilderMetadataGroups = React.useMemo(() => {
+    const availableTables = modelMetadata?.tables ?? [];
     const measuresByTable = new Map<string, Array<{ name: string; tableName?: string }>>();
     (modelMetadata?.measures || []).forEach((measure) => {
       const groupKey = measure.tableName || '__ungrouped__';
@@ -3623,7 +3634,7 @@ export function App() {
         )),
       }))
       .filter((group) => group.columns.length > 0 || group.measures.length > 0);
-  }, [availableTables, modelMetadata?.measures, queryBuilderSearch]);
+  }, [modelMetadata?.tables, modelMetadata?.measures, queryBuilderSearch]);
   const allQueryBuilderColumns = React.useMemo(
     () => queryBuilderMetadataGroups.flatMap((group) => group.columns),
     [queryBuilderMetadataGroups]
@@ -3654,18 +3665,6 @@ export function App() {
       [category]: !previous[category],
     }));
   };
-
-  useEffect(() => {
-    if (importSummary.length > 0) {
-      setActiveRightPaneTab('visuals');
-    }
-  }, [importSummary.length]);
-
-  useEffect(() => {
-    if (modelMetadata && activeRightPaneTab === 'properties') {
-      setActiveRightPaneTab('fields');
-    }
-  }, [modelMetadata, activeRightPaneTab]);
 
   useEffect(() => {
     if (queryBuilderMetadataGroups.length === 0) {
@@ -3725,11 +3724,6 @@ export function App() {
     { id: 'import', label: '导入', color: '#3B82F6' },
     { id: 'ai', label: 'AI', color: '#8B5CF6' },
     { id: 'model', label: '模型', color: '#F59E0B' },
-  ];
-  const rightPaneTabs: Array<{ id: RightPaneTabId; label: string; color: string }> = [
-    { id: 'visuals', label: '视觉对象', color: '#22C983' },
-    { id: 'fields', label: '字段', color: '#3B82F6' },
-    { id: 'properties', label: '属性', color: '#F59E0B' },
   ];
   const activeInspectorMeta = inspectorSections.find((item) => item.id === activeLeftPaneSection) || inspectorSections[0];
   const showReportRightPane = workspaceMode === 'report' && showRightPane;
@@ -3944,20 +3938,6 @@ export function App() {
       </div>
     );
   })();
-  const collapseChromeButtonStyle: React.CSSProperties = {
-    width: 20,
-    height: 20,
-    borderRadius: 3,
-    border: '1px solid transparent',
-    background: 'transparent',
-    color: shellPalette.textSubtle,
-    fontSize: 12,
-    lineHeight: 1,
-    cursor: 'pointer',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
   const renderImportSummaryList = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {importSummary.length === 0 ? (
@@ -4147,7 +4127,22 @@ export function App() {
       )}
     </div>
   );
-  const renderLeftPaneContent = () => {
+  const collapseChromeButtonStyle: React.CSSProperties = {
+    width: 20,
+    height: 20,
+    borderRadius: 3,
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: shellPalette.textSubtle,
+    fontSize: 12,
+    lineHeight: 1,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
+
+  const renderRightPaneContent = () => {
     if (activeLeftPaneSection === 'import') {
       return (
         <PaneSurface
@@ -4282,10 +4277,7 @@ export function App() {
                 </div>
               ) : null}
             </PaneCard>
-            <PaneCard
-              title="AI 对话修改"
-              subtitle="继续调整图表和布局。"
-            >
+            <PaneCard title="AI 对话修改" subtitle="继续调整图表和布局。">
               <div style={{ marginBottom: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
                 对话开关在顶部。
               </div>
@@ -4523,9 +4515,9 @@ export function App() {
     }
 
     return (
-        <PaneSurface
-          title="开始"
-          subtitle="开始当前工作流。"
+      <PaneSurface
+        title="开始"
+        subtitle="开始当前工作流。"
         borderSide="left"
         actions={(
           <button
@@ -4596,145 +4588,6 @@ export function App() {
           </PaneCard>
         </div>
       </PaneSurface>
-    );
-  };
-  const renderRightPaneContent = () => {
-    if (activeRightPaneTab === 'visuals') {
-      return (
-        <RightPaneSurface>
-          <PaneTabs items={rightPaneTabs} activeId={activeRightPaneTab} onChange={setActiveRightPaneTab} />
-          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12 }}>
-            {renderImportSummaryList()}
-          </div>
-        </RightPaneSurface>
-      );
-    }
-
-    if (activeRightPaneTab === 'fields') {
-      return (
-        <RightPaneSurface>
-          <PaneTabs items={rightPaneTabs} activeId={activeRightPaneTab} onChange={setActiveRightPaneTab} />
-          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <PaneCard title="模型字段" subtitle="这里模拟 Power BI Desktop 的 Fields pane。">
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('tables')}
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: activeTab === 'tables' ? shellPalette.accent : shellPalette.ribbonMutedBg,
-                    color: activeTab === 'tables' ? '#FFFFFF' : shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  表 ({modelMetadata?.tables.length || 0})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('measures')}
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: activeTab === 'measures' ? shellPalette.accent : shellPalette.ribbonMutedBg,
-                    color: activeTab === 'measures' ? '#FFFFFF' : shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  度量 ({modelMetadata?.measures.length || 0})
-                </button>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {activeTab === 'measures'
-                  ? modelMetadata?.measures.map((measure, idx) => (
-                    <div
-                      key={`${measure.tableName || 'unknown'}-${measure.name}-${idx}`}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        border: `1px solid ${shellPalette.border}`,
-                        background: shellPalette.ribbonMutedBg,
-                      }}
-                    >
-                      <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{measure.name}</div>
-                      <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {measure.tableName || '未分组'}
-                      </div>
-                    </div>
-                  ))
-                  : modelMetadata?.tables.map((table, idx) => (
-                    <div
-                      key={`${table.name}-${idx}`}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        border: `1px solid ${shellPalette.border}`,
-                        background: shellPalette.ribbonMutedBg,
-                      }}
-                    >
-                      <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{table.name}</div>
-                      <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {table.columns.length} 列
-                      </div>
-                    </div>
-                  ))}
-                {!modelMetadata ? (
-                  <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
-                    连接成功后会在这里展示表和度量。
-                  </div>
-                ) : null}
-              </div>
-            </PaneCard>
-          </div>
-        </RightPaneSurface>
-      );
-    }
-
-    return (
-      <RightPaneSurface>
-        <PaneTabs items={rightPaneTabs} activeId={activeRightPaneTab} onChange={setActiveRightPaneTab} />
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <PaneCard title="画布属性" subtitle="当前布局状态。">
-            <div style={{ display: 'grid', gap: 10 }}>
-              <InfoPill label="左侧导航" value={showLeftPane ? '显示中' : '已隐藏'} tone={showLeftPane ? 'accent' : 'default'} />
-              <InfoPill label="右侧设置" value={showRightPane ? '显示中' : '已折叠'} tone={showRightPane ? 'accent' : 'default'} />
-            </div>
-            <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-              这里显示当前状态。
-            </div>
-          </PaneCard>
-          <PaneCard title="当前状态" subtitle="当前报表、选中视觉对象和生成状态。">
-            <div style={{ display: 'grid', gap: 10 }}>
-              <InfoPill label="报表" value={currentReport?.name || '未生成'} tone={hasReport ? 'accent' : 'default'} />
-              <InfoPill label="页面" value={String(currentPages.length)} />
-              <InfoPill label="查询" value={String(currentQueries.length)} />
-              <InfoPill label="选中视觉对象" value={activeImportedComponentId || '未选中'} tone={activeImportedComponentId ? 'success' : 'default'} />
-            </div>
-            {generationProgress ? (
-              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12 }}>
-                {generationProgress}
-              </div>
-            ) : null}
-          </PaneCard>
-          <PaneCard title="应用设置" subtitle="当前工作区上下文。">
-            <div style={{ display: 'grid', gap: 10 }}>
-              <InfoPill label="当前上下文" value={activeInspectorMeta.label} tone="accent" />
-              <InfoPill label="当前右侧页签" value={rightPaneTabs.find((tab) => tab.id === activeRightPaneTab)?.label || activeRightPaneTab} />
-            </div>
-            <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-              相关入口都在顶部。
-            </div>
-          </PaneCard>
-        </div>
-      </RightPaneSurface>
     );
   };
   const renderCollapsedRightPane = () => (
@@ -5145,7 +4998,7 @@ export function App() {
             </div>
           )
         )}
-        rightPane={workspaceMode === 'report' ? (showReportRightPane ? renderLeftPaneContent() : renderCollapsedRightPane()) : undefined}
+        rightPane={workspaceMode === 'report' ? (showReportRightPane ? renderRightPaneContent() : renderCollapsedRightPane()) : undefined}
       />
 
       {datasetDialogMode === 'import-json' && (
@@ -5999,7 +5852,7 @@ export function App() {
                         fontSize: 12,
                         lineHeight: 1.65,
                         boxSizing: 'border-box',
-                        fontFamily: 'Consolas, \"Courier New\", monospace',
+                        fontFamily: 'Consolas, "Courier New", monospace',
                       }}
                     />
                   </div>

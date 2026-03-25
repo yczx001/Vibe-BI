@@ -131,7 +131,7 @@ function formatValue(value: unknown, format?: ValueFormat): string {
   const decimals = format?.decimals ?? 0;
 
   switch (type) {
-    case 'currency':
+    case 'currency': {
       const currency = format?.currency || 'CNY';
       return new Intl.NumberFormat('zh-CN', {
         style: 'currency',
@@ -139,6 +139,7 @@ function formatValue(value: unknown, format?: ValueFormat): string {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
       }).format(num);
+    }
 
     case 'percentage':
       return `${(num * 100).toFixed(decimals)}%`;

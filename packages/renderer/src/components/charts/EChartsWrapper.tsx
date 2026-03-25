@@ -25,7 +25,6 @@ export function EChartsWrapper({ config, data, style }: EChartsWrapperProps) {
     chartInstance.current = echarts.init(chartRef.current, undefined, {
       renderer: 'canvas',
     });
-    chartInstance.current.setOption(option);
 
     // Resize observer
     const resizeObserver = new ResizeObserver(() => {

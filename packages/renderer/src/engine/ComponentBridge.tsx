@@ -326,9 +326,12 @@ interface QueryResultsInspectorProps {
 }
 
 function QueryResultsInspector({ query, fallbackData, dataSource, apiBaseUrl }: QueryResultsInspectorProps) {
-  const evaluateQueries = query.evaluateQueries && query.evaluateQueries.length > 0
-    ? query.evaluateQueries
-    : [query.executionDax || query.dax];
+  const evaluateQueries = useMemo(
+    () => (query.evaluateQueries && query.evaluateQueries.length > 0
+      ? query.evaluateQueries
+      : [query.executionDax || query.dax]),
+    [query.dax, query.evaluateQueries, query.executionDax]
+  );
   const defaultTab = Math.min(Math.max(query.selectedEvaluateIndex || 0, 0), evaluateQueries.length - 1);
   const [activeTab, setActiveTab] = useState(defaultTab);
 
@@ -351,9 +354,12 @@ function QueryResultsInspector({ query, fallbackData, dataSource, apiBaseUrl }: 
     apiBaseUrl,
   });
 
-  const rows = activeTab === defaultTab && fallbackData.length > 0
-    ? fallbackData
-    : (data || []);
+  const rows = useMemo(
+    () => (activeTab === defaultTab && fallbackData.length > 0
+      ? fallbackData
+      : (data || [])),
+    [activeTab, data, defaultTab, fallbackData]
+  );
   const previewColumns = useMemo(() => {
     if (!rows || rows.length === 0) {
       return [] as string[];

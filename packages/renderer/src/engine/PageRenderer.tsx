@@ -16,7 +16,7 @@ export function PageRenderer({
   page,
   queries,
   dataSource,
-  pageIndex,
+  pageIndex: _pageIndex,
   apiBaseUrl,
   activeComponentId,
   showInspectorActions = false,

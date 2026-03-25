@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using VibeBi.AI.Orchestration;
 using VibeBi.AI.Providers;
@@ -10,6 +11,7 @@ namespace VibeBi.Api.Controllers;
 [Route("api/[controller]")]
 public class AiController : ControllerBase
 {
+    private static readonly JsonSerializerOptions ProgressJsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IModelMetadataService _metadataService;
     private readonly ILogger<AiController> _logger;
 
@@ -173,7 +175,7 @@ public class AiController : ControllerBase
 
     private async Task WriteProgressAsync(GenerationProgress progress)
     {
-        var json = System.Text.Json.JsonSerializer.Serialize(progress);
+        var json = JsonSerializer.Serialize(progress, ProgressJsonOptions);
         await Response.WriteAsync($"data: {json}\n\n");
         await Response.Body.FlushAsync();
     }

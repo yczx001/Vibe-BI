@@ -135,7 +135,7 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
       }
 
       // Build DAX with filters
-      let dax = query.executionDax || query.dax;
+      const dax = query.executionDax || query.dax;
       if (filters && query.parameters) {
         for (const param of query.parameters) {
           if (param.filterRef && filters[param.filterRef]) {
