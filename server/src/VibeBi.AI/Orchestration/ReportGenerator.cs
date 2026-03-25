@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using VibeBi.AI.Providers;
 using VibeBi.Core.Models;
 using VibeBi.Core.Services;
@@ -108,19 +109,11 @@ public class ReportGenerator
 
         try
         {
-            var generatedResult = DeserializeAiJson<AiReportResult>(reportJson.ToString());
-
-            if (generatedResult?.Report != null)
-            {
-                report = generatedResult.Report;
-                pages = generatedResult.Pages;
-                queries = generatedResult.Queries;
-                completionMessage = generatedResult.Message;
-            }
-            else
-            {
-                report = DeserializeAiJson<ReportDefinition>(reportJson.ToString());
-            }
+            var generatedResult = DeserializeAiReportResult(reportJson.ToString());
+            report = generatedResult.Report;
+            pages = generatedResult.Pages;
+            queries = generatedResult.Queries;
+            completionMessage = generatedResult.Message;
         }
         catch (Exception ex)
         {
@@ -203,6 +196,7 @@ public class ReportGenerator
         ReportDefinition? report = null;
         List<PageDefinition>? pages = null;
         List<QueryDefinition>? queries = null;
+        string? completionMessage = null;
 
         yield return new GenerationProgress { Step = "validating", ProgressPercent = 10, Message = "正在分析当前报表..." };
 
@@ -238,20 +232,11 @@ public class ReportGenerator
 
         try
         {
-            var refinedResult = DeserializeAiJson<AiReportResult>(reportJson.ToString());
-
-            if (refinedResult?.Report != null)
-            {
-                report = refinedResult.Report;
-                pages = refinedResult.Pages ?? request.CurrentContext.Pages;
-                queries = refinedResult.Queries ?? request.CurrentContext.Queries;
-            }
-            else
-            {
-                report = DeserializeAiJson<ReportDefinition>(reportJson.ToString());
-                pages = request.CurrentContext.Pages;
-                queries = request.CurrentContext.Queries;
-            }
+            var refinedResult = DeserializeAiReportResult(reportJson.ToString(), request.CurrentContext);
+            report = refinedResult.Report;
+            pages = refinedResult.Pages ?? request.CurrentContext.Pages;
+            queries = refinedResult.Queries ?? request.CurrentContext.Queries;
+            completionMessage = refinedResult.Message;
         }
         catch (Exception ex)
         {
@@ -280,11 +265,49 @@ public class ReportGenerator
             yield break;
         }
 
+        pages ??= request.CurrentContext.Pages;
+        queries ??= request.CurrentContext.Queries;
+
+        if (pages.Count == 0)
+        {
+            yield return new GenerationProgress
+            {
+                Step = "error",
+                ProgressPercent = 100,
+                Message = "修改后的报表未包含任何页面"
+            };
+            yield break;
+        }
+
+        var requiredQueryIds = pages
+            .SelectMany(page => page.Components)
+            .Select(component => component.QueryRef)
+            .Where(queryRef => !string.IsNullOrWhiteSpace(queryRef))
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var availableQueryIds = new HashSet<string>(queries.Select(query => query.Id), StringComparer.Ordinal);
+        var missingQueryIds = requiredQueryIds
+            .Where(queryId => !availableQueryIds.Contains(queryId))
+            .ToList();
+
+        if (missingQueryIds.Count > 0)
+        {
+            yield return new GenerationProgress
+            {
+                Step = "error",
+                ProgressPercent = 100,
+                Message = $"修改后的页面引用了不存在的查询: {string.Join(", ", missingQueryIds)}"
+            };
+            yield break;
+        }
+
         yield return new GenerationProgress
         {
             Step = "complete",
             ProgressPercent = 100,
-            Message = "报表修改完成",
+            Message = completionMessage ?? "报表修改完成",
             Report = report,
             Pages = pages,
             Queries = queries
@@ -475,6 +498,117 @@ public class ReportGenerator
     {
         var payload = ExtractJsonPayload(content);
         return JsonSerializer.Deserialize<T>(payload, JsonOptions);
+    }
+
+    private static AiReportResult DeserializeAiReportResult(string content, CurrentReportContext? fallbackContext = null)
+    {
+        var payload = ExtractJsonPayload(content);
+        var rootNode = JsonNode.Parse(payload) ?? throw new JsonException("AI 未返回有效 JSON 对象");
+
+        if (rootNode is not JsonObject rootObject)
+        {
+            throw new JsonException("AI 未返回 JSON 对象");
+        }
+
+        var reportNode = GetPropertyValue(rootObject, "report");
+        var pagesNode = GetPropertyValue(rootObject, "pages");
+        var queriesNode = GetPropertyValue(rootObject, "queries");
+        var messageNode = GetPropertyValue(rootObject, "message");
+
+        if (reportNode == null)
+        {
+            reportNode = rootObject;
+            pagesNode = null;
+            queriesNode = null;
+            messageNode = null;
+        }
+
+        var pages = DeserializeOptionalNode<List<PageDefinition>>(pagesNode) ?? fallbackContext?.Pages;
+        var queries = DeserializeOptionalNode<List<QueryDefinition>>(queriesNode) ?? fallbackContext?.Queries;
+        var normalizedReportNode = NormalizeReportNode(reportNode, fallbackContext, pages);
+        var report = normalizedReportNode.Deserialize<ReportDefinition>(JsonOptions)
+            ?? throw new JsonException("AI 未返回有效的报表定义");
+
+        return new AiReportResult
+        {
+            Report = report,
+            Pages = pages,
+            Queries = queries,
+            Message = messageNode is JsonValue ? messageNode.GetValue<string?>() : null
+        };
+    }
+
+    private static T? DeserializeOptionalNode<T>(JsonNode? node)
+    {
+        if (node == null)
+        {
+            return default;
+        }
+
+        return node.Deserialize<T>(JsonOptions);
+    }
+
+    private static JsonObject NormalizeReportNode(
+        JsonNode reportNode,
+        CurrentReportContext? fallbackContext,
+        IReadOnlyList<PageDefinition>? pages)
+    {
+        if (reportNode is not JsonObject reportObject)
+        {
+            throw new JsonException("report 字段必须是 JSON 对象");
+        }
+
+        var normalized = new JsonObject(options: new JsonNodeOptions { PropertyNameCaseInsensitive = true });
+        foreach (var property in reportObject)
+        {
+            normalized[property.Key] = property.Value?.DeepClone();
+        }
+
+        var fallbackReport = fallbackContext?.Report;
+        var pageIds = pages?.Select(page => page.Id).ToList()
+            ?? fallbackContext?.Pages.Select(page => page.Id).ToList()
+            ?? fallbackReport?.Pages;
+
+        normalized["formatVersion"] ??= JsonValue.Create(fallbackReport?.FormatVersion ?? "1.0.0");
+        normalized["id"] ??= JsonValue.Create(fallbackReport?.Id ?? "report-ai-generated");
+        normalized["name"] ??= JsonValue.Create(fallbackReport?.Name ?? "AI 生成报表");
+        normalized["createdAt"] ??= JsonValue.Create((fallbackReport?.CreatedAt ?? DateTime.UtcNow).ToString("O"));
+        normalized["modifiedAt"] ??= JsonValue.Create((fallbackReport?.ModifiedAt ?? DateTime.UtcNow).ToString("O"));
+
+        if (pageIds is { Count: > 0 })
+        {
+            var pageArray = new JsonArray();
+            foreach (var pageId in pageIds)
+            {
+                pageArray.Add(JsonValue.Create(pageId));
+            }
+
+            normalized["pages"] = pageArray;
+
+            if (normalized["defaultPage"] == null)
+            {
+                normalized["defaultPage"] = JsonValue.Create(fallbackReport?.DefaultPage ?? pageIds[0]);
+            }
+        }
+        else
+        {
+            normalized["pages"] ??= new JsonArray();
+        }
+
+        return normalized;
+    }
+
+    private static JsonNode? GetPropertyValue(JsonObject obj, string propertyName)
+    {
+        foreach (var property in obj)
+        {
+            if (string.Equals(property.Key, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                return property.Value;
+            }
+        }
+
+        return null;
     }
 
     private static string ExtractJsonPayload(string content)
