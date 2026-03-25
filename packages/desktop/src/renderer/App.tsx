@@ -417,6 +417,22 @@ function resolveComponentTypeFromDatasetChartType(chartType: DatasetVisualType):
   return 'echarts';
 }
 
+function resolveRenderableChartType(chartType: DatasetVisualType): ChartType {
+  if (chartType === 'pie') {
+    return 'pie';
+  }
+  if (chartType === 'line') {
+    return 'line';
+  }
+  if (chartType === 'area') {
+    return 'area';
+  }
+  if (chartType === 'scatter') {
+    return 'scatter';
+  }
+  return 'bar';
+}
+
 function createDatasetFields(result?: QueryResult) {
   if (!result) {
     return [];
@@ -2833,7 +2849,163 @@ export function App() {
     }));
   };
 
-  // AI Generate from Import - use imported DAX queries to generate optimized report
+  const createReportFromDatasetAssets = (
+    datasetAssets: ImportSummaryItem[],
+    options?: {
+      reportName?: string;
+      reportDescription?: string;
+      generationMode?: ReportDefinition['generationMode'];
+      completionMessage?: string;
+    }
+  ) => {
+    if (datasetAssets.length === 0) {
+      setGenerationProgress('当前没有可用于自动创建报表的可见数据集素材。');
+      return false;
+    }
+
+    const reportId = `report-${Date.now()}`;
+    const pageId = `page-${Date.now()}`;
+    const newQueries: QueryDefinition[] = [];
+    const newComponents: PageDefinition['components'] = [];
+    const renderedSummaryMap = new Map<string, { queryId: string; componentId: string }>();
+    let cursorX = 0;
+    let cursorY = 0;
+    let rowHeight = 0;
+
+    const placeComponent = (width: number, height: number) => {
+      if (width >= 12) {
+        if (cursorX !== 0) {
+          cursorY += rowHeight;
+          cursorX = 0;
+          rowHeight = 0;
+        }
+
+        const position = { x: 0, y: cursorY, w: 12, h: height };
+        cursorY += height;
+        return position;
+      }
+
+      if (cursorX + width > 12) {
+        cursorY += rowHeight;
+        cursorX = 0;
+        rowHeight = 0;
+      }
+
+      const position = { x: cursorX, y: cursorY, w: width, h: height };
+      cursorX += width;
+      rowHeight = Math.max(rowHeight, height);
+
+      if (cursorX >= 12) {
+        cursorY += rowHeight;
+        cursorX = 0;
+        rowHeight = 0;
+      }
+
+      return position;
+    };
+
+    datasetAssets.forEach((item) => {
+      const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
+      if (!visibleChart) {
+        return;
+      }
+
+      const filteredResult = filterQueryResultByVisibleFields(item.previewResult, item);
+      const queryText = item.executionDax || item.fullQuery || '';
+      if (!queryText) {
+        return;
+      }
+
+      const queryId = item.queryId || `query-${item.id}`;
+      const componentId = item.componentId || `component-${visibleChart.id}`;
+      const componentType = visibleChart.componentType === 'filter' ? 'data-table' : visibleChart.componentType;
+      const chartType = resolveRenderableChartType(visibleChart.chartType);
+      const isHighPriority = item.score >= 15;
+      const isTable = componentType === 'data-table';
+      const isKpi = componentType === 'kpi-card';
+      const width = isTable ? 12 : isKpi ? 3 : isHighPriority ? 12 : 6;
+      const height = isTable ? 6 : isKpi ? 2 : isHighPriority ? 6 : 5;
+
+      newQueries.push({
+        id: queryId,
+        name: item.name,
+        dax: queryText,
+        executionDax: queryText,
+        evaluateQueries: item.evaluateQueries,
+        selectedEvaluateIndex: item.selectedEvaluateIndex,
+        parameters: [],
+      });
+
+      newComponents.push({
+        id: componentId,
+        type: componentType,
+        position: placeComponent(width, height),
+        queryRef: queryId,
+        config: buildComponentConfig(componentType, chartType, item.name, filteredResult),
+      });
+      renderedSummaryMap.set(item.id, { queryId, componentId });
+
+      if (filteredResult) {
+        primeQueryCache(queryId, filteredResult.rows);
+      }
+    });
+
+    if (newComponents.length === 0 || newQueries.length === 0) {
+      setGenerationProgress('可见素材缺少可执行查询，无法自动创建报表。');
+      return false;
+    }
+
+    const reportName = options?.reportName?.trim()
+      || `${modelMetadata?.databaseName || '数据模型'} 自动报表`;
+    const reportDescription = options?.reportDescription?.trim()
+      || `基于 ${datasetAssets.length} 个可见数据集素材自动创建`;
+
+    setGeneratedReport({
+      formatVersion: '1.0.0',
+      id: reportId,
+      name: reportName,
+      description: reportDescription,
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+      generationMode: options?.generationMode || 'imported',
+      pages: [pageId],
+      defaultPage: pageId,
+    });
+    setGeneratedPages([{
+      id: pageId,
+      name: '自动生成页面',
+      layout: {
+        type: 'grid',
+        columns: 12,
+        rowHeight: 60,
+        gap: 16,
+        padding: 24,
+      },
+      filters: [],
+      components: newComponents,
+    }]);
+    setGeneratedQueries(newQueries);
+    setImportSummary((previous) => previous.map((item) => {
+      const rendered = renderedSummaryMap.get(item.id);
+      return rendered
+        ? {
+          ...item,
+          queryId: rendered.queryId,
+          componentId: rendered.componentId,
+          isRendered: true,
+        }
+        : item;
+    }));
+    setActiveImportedComponentId(newComponents[0]?.id);
+    setWorkspaceMode('report');
+    setShowRightPane(true);
+    setGenerationProgress(
+      options?.completionMessage || `已根据 ${datasetAssets.length} 个可见素材创建报表，生成 ${newComponents.length} 个组件。`
+    );
+    return true;
+  };
+
+  // Generate report directly from visible dataset assets.
   const handleAiGenerateFromImport = async () => {
     const importableVisuals = importSummary.filter((item) => (
       item.isVisible
@@ -2847,210 +3019,21 @@ export function App() {
     setActiveLeftPaneSection('ai');
     setShowRightPane(true);
 
-    if (!apiUrl) {
-      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
-      return;
-    }
-
-    if (!isConnected) {
-      setGenerationProgress('请先连接模型，再使用 AI 生成。');
-      return;
-    }
-
     if (importableVisuals.length === 0) {
       setGenerationProgress('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
       return;
     }
 
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
-      handleOpenSettings();
-      return;
-    }
-
     setIsGenerating(true);
-    setGenerationProgress('正在分析当前可见的数据集素材...');
+    setGenerationProgress('正在根据当前可见素材创建报表...');
 
     try {
-      const promptLines: string[] = [];
-      promptLines.push('基于以下数据集素材，生成一个现代化的 Power BI Desktop 风格报表。');
-      promptLines.push('');
-      promptLines.push('### 可用数据集与图表素材');
-      importableVisuals.forEach((item, idx) => {
-        const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
-        const visibleFields = item.fields.filter((field) => field.isVisible).map((field) => field.name);
-        const dax = item.executionDax || item.fullQuery || '';
-
-        promptLines.push(`${idx + 1}. ${item.name} (${visibleChart?.chartType || item.type})`);
-        promptLines.push(`   数据行数: ${item.rowCount}, 执行时间: ${item.executionTime.toFixed(0)}ms`);
-        promptLines.push(`   可见字段: ${visibleFields.join(', ') || '无'}`);
-        promptLines.push(`   DAX: ${dax.slice(0, 150)}${dax.length > 150 ? '...' : ''}`);
-        promptLines.push('');
+      createReportFromDatasetAssets(importableVisuals, {
+        reportName: `${modelMetadata?.databaseName || '数据视图'} 素材报表`,
+        reportDescription: `基于 ${importableVisuals.length} 个可见素材自动排版生成`,
+        generationMode: 'imported',
+        completionMessage: `已根据 ${importableVisuals.length} 个可见素材自动创建报表。`,
       });
-      promptLines.push('');
-      promptLines.push('要求：');
-      promptLines.push('1. 保持 Power BI Desktop 的专业感，但排版更现代、信息层级更清晰');
-      promptLines.push('2. 只使用上述可见数据集、可见图表、可见字段');
-      promptLines.push('3. 根据图表语义安排版式，重要素材优先获得更大空间');
-      promptLines.push('4. 输出应便于继续做提示词反向编辑和手工微调');
-
-      const prompt = promptLines.join('\n');
-
-      const response = await fetch(`${apiUrl}/api/ai/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: prompt,
-          pageCount: 1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`生成请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let reportJson = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const json = line.substring(6);
-            try {
-              const progress = JSON.parse(json);
-              setGenerationProgress(progress.message || progress.step);
-
-              if (progress.step === 'complete' && progress.report) {
-                const reportId = progress.report.id || `ai-generated-${Date.now()}`;
-                const pageId = `page-${Date.now()}`;
-                const newQueries: QueryDefinition[] = [];
-                const newComponents: PageDefinition['components'] = [];
-                const renderedSummaryMap = new Map<string, { queryId: string; componentId: string }>();
-                let yPos = 0;
-
-                importableVisuals.forEach((item, idx) => {
-                  const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
-                  if (!visibleChart) {
-                    return;
-                  }
-
-                  const filteredResult = filterQueryResultByVisibleFields(item.previewResult, item);
-                  const queryText = item.executionDax || item.fullQuery || '';
-                  const queryId = item.queryId || `q_${idx}`;
-                  const componentId = `comp_${idx}`;
-                  const componentType = visibleChart.componentType === 'filter' ? 'data-table' : visibleChart.componentType;
-                  const chartType = visibleChart.chartType === 'pie'
-                    ? 'pie'
-                    : visibleChart.chartType === 'line'
-                      ? 'line'
-                      : visibleChart.chartType === 'area'
-                        ? 'area'
-                        : visibleChart.chartType === 'scatter'
-                          ? 'scatter'
-                          : 'bar';
-
-                  if (!queryText) {
-                    return;
-                  }
-
-                  newQueries.push({
-                    id: queryId,
-                    name: item.name,
-                    dax: queryText,
-                    executionDax: queryText,
-                    evaluateQueries: item.evaluateQueries,
-                    selectedEvaluateIndex: item.selectedEvaluateIndex,
-                    parameters: [],
-                  });
-
-                  const isHighPriority = item.score >= 15;
-                  const height = componentType === 'kpi-card' ? 2 : componentType === 'data-table' ? 5 : isHighPriority ? 6 : 4;
-                  const width = componentType === 'kpi-card' ? 4 : isHighPriority ? 12 : 6;
-
-                  newComponents.push({
-                    id: componentId,
-                    type: componentType,
-                    position: { x: 0, y: yPos, w: width, h: height },
-                    queryRef: queryId,
-                    config: buildComponentConfig(componentType, chartType, item.name, filteredResult),
-                  });
-                  renderedSummaryMap.set(item.id, { queryId, componentId });
-
-                  if (filteredResult) {
-                    primeQueryCache(queryId, filteredResult.rows);
-                  }
-
-                  yPos += height;
-                });
-
-                setGeneratedReport({
-                  ...progress.report,
-                  id: reportId,
-                  name: progress.report.name || `AI生成: ${importableVisuals.length} 个数据集素材`,
-                  description: progress.report.description || '基于当前可见数据集素材自动生成的报表',
-                  pages: [pageId],
-                  defaultPage: pageId,
-                });
-
-                setGeneratedPages([{
-                  id: pageId,
-                  name: 'AI生成的报表',
-                  layout: {
-                    type: 'grid',
-                    columns: 12,
-                    rowHeight: 60,
-                    gap: 16,
-                    padding: 24,
-                  },
-                  filters: [],
-                  components: newComponents,
-                }]);
-
-                setGeneratedQueries(newQueries);
-                setImportSummary((previous) => previous.map((item) => {
-                  const rendered = renderedSummaryMap.get(item.id);
-                  return {
-                    ...item,
-                    queryId: rendered?.queryId || item.queryId,
-                    componentId: rendered?.componentId,
-                    isRendered: Boolean(rendered),
-                  };
-                }));
-                setActiveImportedComponentId(newComponents[0]?.id);
-                setWorkspaceMode('report');
-                setGenerationProgress(`生成完成！已创建 ${newQueries.length} 个查询，${newComponents.length} 个组件`);
-              } else if (progress.step === 'error') {
-                setGenerationProgress(`错误: ${progress.message}`);
-              }
-
-              if (progress.partialContent) {
-                reportJson += progress.partialContent;
-              }
-            } catch {
-              // Ignore parse errors
-            }
-          }
-        }
-      }
     } catch (err) {
       setGenerationProgress(`生成失败: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -3243,6 +3226,27 @@ export function App() {
     setActiveRibbonTab('ai');
     setActiveLeftPaneSection('ai');
     setShowRightPane(true);
+
+    if (visibleDatasetAssets.length > 0) {
+      setIsGenerating(true);
+      setGenerationProgress('检测到数据视图中已有可见素材，正在自动创建报表...');
+
+      try {
+        const reportName = userPrompt.trim()
+          ? `${modelMetadata?.databaseName || '模型'}: ${userPrompt.trim().slice(0, 24)}${userPrompt.trim().length > 24 ? '...' : ''}`
+          : `${modelMetadata?.databaseName || '模型'} 自动报表`;
+        createReportFromDatasetAssets(visibleDatasetAssets, {
+          reportName,
+          reportDescription: `优先基于数据视图中的 ${visibleDatasetAssets.length} 个可见素材自动创建`,
+          generationMode: 'ai-generated',
+          completionMessage: `已根据数据视图中的 ${visibleDatasetAssets.length} 个可见素材自动创建报表。`,
+        });
+      } finally {
+        setIsGenerating(false);
+      }
+
+      return;
+    }
 
     if (!apiUrl) {
       setGenerationProgress('后端服务尚未就绪，请稍后再试。');
@@ -4627,7 +4631,7 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
               label={isGenerating ? '生成中...' : '从模型生成'}
-              description="根据当前模型和提示词生成报表"
+              description="优先根据数据视图中的可见素材自动创建报表，无素材时再按模型和提示词生成"
               onClick={() => {
                 setWorkspaceMode('report');
                 setActiveLeftPaneSection('ai');
@@ -4641,7 +4645,7 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('visual-library', '#7DD3FC', '#3B82F6')}
               label="从素材生成"
-              description="仅使用可见素材库自动排版生成"
+              description="仅使用当前可见素材库直接自动排版生成"
               onClick={() => { void handleAiGenerateFromImport(); }}
               disabled={isGenerating || importableVisualCount === 0}
               showDescription={false}
