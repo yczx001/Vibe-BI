@@ -1,4 +1,5 @@
 import React, { type ReactNode } from 'react';
+import { ShellIcon, type ShellIconName } from './ShellIcon';
 
 export const shellPalette = {
   appBg: '#F7F4EE',
@@ -523,12 +524,16 @@ export function PaneCard({
   actions,
   children,
   tone = 'default',
+  style,
+  bodyStyle,
 }: {
   title: string;
   subtitle?: string;
   actions?: ReactNode;
   children: ReactNode;
   tone?: 'default' | 'accent' | 'success' | 'warning';
+  style?: React.CSSProperties;
+  bodyStyle?: React.CSSProperties;
 }) {
   const styles = getCardToneStyles(tone);
 
@@ -540,6 +545,7 @@ export function PaneCard({
         background: styles.background,
         boxShadow: tone === 'default' ? shellPalette.shadow : '0 8px 20px rgba(15, 23, 42, 0.05)',
         overflow: 'hidden',
+        ...style,
       }}
     >
       <div
@@ -564,7 +570,12 @@ export function PaneCard({
         </div>
         {actions}
       </div>
-      <div style={{ padding: 14 }}>
+      <div
+        style={{
+          padding: 14,
+          ...bodyStyle,
+        }}
+      >
         {children}
       </div>
     </div>
@@ -585,10 +596,14 @@ export function InfoPill({
   return (
     <div
       style={{
+        display: 'inline-flex',
+        alignItems: 'center',
         padding: '6px 10px',
         borderRadius: 999,
         fontSize: 11,
         fontWeight: 600,
+        lineHeight: 1.2,
+        whiteSpace: 'nowrap',
         ...styles,
       }}
     >
@@ -655,7 +670,7 @@ export function WorkspaceWelcome({
   const steps = [
     {
       badge: '01',
-      icon: '◎',
+      icon: 'connect' as const,
       title: '连接数据源',
       subtitle: isConnected
         ? '已连接，可继续导入。'
@@ -668,7 +683,7 @@ export function WorkspaceWelcome({
     },
     {
       badge: '02',
-      icon: '↓',
+      icon: 'import' as const,
       title: '导入 JSON',
       subtitle: hasImportedVisuals
         ? '已导入，可检查 visual。'
@@ -681,7 +696,7 @@ export function WorkspaceWelcome({
     },
     {
       badge: '03',
-      icon: '✦',
+      icon: 'sparkle' as const,
       title: 'AI 生成',
       subtitle: canGenerate
         ? '可生成报表。'
@@ -694,7 +709,7 @@ export function WorkspaceWelcome({
     },
     {
       badge: '04',
-      icon: '⋯',
+      icon: 'message' as const,
       title: 'AI 助手',
       subtitle: canOpenAi
         ? '可继续对话调整。'
@@ -818,12 +833,10 @@ export function WorkspaceWelcome({
                       : `linear-gradient(180deg, ${step.accent}12 0%, ${step.accent}1E 100%)`,
                     border: step.completed ? 'none' : `1px solid ${step.accent}26`,
                     color: step.completed ? '#FFFFFF' : (step.enabled ? step.accent : shellPalette.textMuted),
-                    fontSize: 22,
-                    fontWeight: 800,
                     boxShadow: step.completed ? '0 14px 24px rgba(15, 23, 42, 0.14)' : '0 8px 18px rgba(15, 23, 42, 0.06)',
                   }}
                 >
-                  {step.icon}
+                  <ShellIcon name={step.icon as ShellIconName} size={22} strokeWidth={1.9} />
                 </div>
                 <div style={{ marginTop: 18, color: shellPalette.text, fontSize: 18, fontWeight: 700 }}>
                   {step.title}

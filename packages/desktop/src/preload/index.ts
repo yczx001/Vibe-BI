@@ -1,17 +1,14 @@
-console.log('[Preload] Starting preload script...');
-
 try {
   const { contextBridge, ipcRenderer } = require('electron');
-  console.log('[Preload] Electron modules loaded');
 
   // Expose APIs to renderer process
   contextBridge.exposeInMainWorld('electronAPI', {
     getApiUrl: () => ipcRenderer.invoke('get-api-url'),
-    selectFile: () => ipcRenderer.invoke('select-file'),
+    selectFile: (options) => ipcRenderer.invoke('select-file', options),
+    readTextFile: (filePath) => ipcRenderer.invoke('read-text-file', filePath),
     saveFile: (defaultName) => ipcRenderer.invoke('save-file', defaultName),
+    scanPowerBiInstances: () => ipcRenderer.invoke('scan-powerbi-instances'),
   });
-
-  console.log('[Preload] electronAPI exposed successfully');
 } catch (err) {
   console.error('[Preload] Error:', err);
 }

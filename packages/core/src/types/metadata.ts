@@ -93,8 +93,10 @@ export interface GenerationProgress {
   message?: string;
   partialContent?: string;
   report?: ReportDefinition;
+  pages?: PageDefinition[];
+  queries?: QueryDefinition[];
 }
 
 // Re-export from report.ts for convenience
-import type { ReportDefinition, ReportPackage } from './report';
+import type { PageDefinition, QueryDefinition, ReportDefinition, ReportPackage } from './report';
 export type { ReportDefinition, ReportPackage };

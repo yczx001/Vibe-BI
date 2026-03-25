@@ -13,7 +13,7 @@ const defaultTheme: ThemeDefinition = {
     chart: ['#0F6CBD', '#8764B8', '#038387', '#CA5010', '#107C10', '#B146C2'],
   },
   typography: {
-    fontFamily: '"Segoe UI", "Segoe UI Variable", system-ui, sans-serif',
+    fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
   },
   components: {
     card: {

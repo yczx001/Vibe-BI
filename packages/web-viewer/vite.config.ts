@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@vibe-bi/core': path.resolve(__dirname, '../core/dist'),
-      '@vibe-bi/renderer': path.resolve(__dirname, '../renderer/dist'),
+      '@vibe-bi/core': path.resolve(__dirname, '../core/src'),
+      '@vibe-bi/renderer': path.resolve(__dirname, '../renderer/src'),
     },
   },
 });

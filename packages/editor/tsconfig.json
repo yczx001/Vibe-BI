@@ -2,14 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": ".",
+    "rootDir": "./src",
     "jsx": "react-jsx",
+    "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
       "@vibe-bi/core": ["../core/dist"],
-      "@vibe-bi/renderer": ["../renderer/dist"],
-      "@vibe-bi/editor": ["../editor/dist"]
+      "@vibe-bi/renderer": ["../renderer/dist"]
     }
   },
-  "include": ["src/**/*", "index.html"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
 }

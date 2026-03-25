@@ -30,6 +30,12 @@ public record CurrentReportContext
 
 public class ReportGenerator
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly IAIProvider _ai;
     private readonly IModelMetadataService _metadataService;
 
@@ -43,9 +49,11 @@ public class ReportGenerator
     {
         string? errorMessage = null;
         ReportDefinition? report = null;
+        List<PageDefinition>? pages = null;
+        List<QueryDefinition>? queries = null;
         ModelMetadata? metadata = null;
+        string? completionMessage = null;
 
-        // Step 1: Read metadata
         yield return new GenerationProgress { Step = "reading_metadata", ProgressPercent = 10, Message = "正在读取数据模型..." };
 
         try
@@ -79,11 +87,9 @@ public class ReportGenerator
             yield break;
         }
 
-        // Step 2: Build prompt
         yield return new GenerationProgress { Step = "building_prompt", ProgressPercent = 20, Message = "正在构建 AI 提示..." };
         var prompt = BuildPrompt(metadata, request);
 
-        // Step 3: Generate report definition (streaming)
         yield return new GenerationProgress { Step = "generating", ProgressPercent = 30, Message = "AI 正在生成报表..." };
         var reportJson = new StringBuilder();
 
@@ -98,15 +104,23 @@ public class ReportGenerator
             };
         }
 
-        // Step 4: Parse JSON
         yield return new GenerationProgress { Step = "parsing", ProgressPercent = 80, Message = "正在解析报表定义..." };
 
         try
         {
-            report = JsonSerializer.Deserialize<ReportDefinition>(reportJson.ToString(), new JsonSerializerOptions
+            var generatedResult = DeserializeAiJson<AiReportResult>(reportJson.ToString());
+
+            if (generatedResult?.Report != null)
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+                report = generatedResult.Report;
+                pages = generatedResult.Pages;
+                queries = generatedResult.Queries;
+                completionMessage = generatedResult.Message;
+            }
+            else
+            {
+                report = DeserializeAiJson<ReportDefinition>(reportJson.ToString());
+            }
         }
         catch (Exception ex)
         {
@@ -135,12 +149,51 @@ public class ReportGenerator
             yield break;
         }
 
+        if (pages == null || pages.Count == 0)
+        {
+            yield return new GenerationProgress
+            {
+                Step = "error",
+                ProgressPercent = 100,
+                Message = "AI 未返回任何页面定义，无法渲染报表"
+            };
+            yield break;
+        }
+
+        queries ??= new List<QueryDefinition>();
+
+        var requiredQueryIds = pages
+            .SelectMany(page => page.Components)
+            .Select(component => component.QueryRef)
+            .Where(queryRef => !string.IsNullOrWhiteSpace(queryRef))
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var availableQueryIds = new HashSet<string>(queries.Select(query => query.Id), StringComparer.Ordinal);
+        var missingQueryIds = requiredQueryIds
+            .Where(queryId => !availableQueryIds.Contains(queryId))
+            .ToList();
+
+        if (missingQueryIds.Count > 0)
+        {
+            yield return new GenerationProgress
+            {
+                Step = "error",
+                ProgressPercent = 100,
+                Message = $"AI 返回的页面引用了不存在的查询: {string.Join(", ", missingQueryIds)}"
+            };
+            yield break;
+        }
+
         yield return new GenerationProgress
         {
             Step = "complete",
             ProgressPercent = 100,
-            Message = "报表生成完成",
-            Report = report
+            Message = completionMessage ?? "报表生成完成",
+            Report = report,
+            Pages = pages,
+            Queries = queries
         };
     }
 
@@ -151,7 +204,6 @@ public class ReportGenerator
         List<PageDefinition>? pages = null;
         List<QueryDefinition>? queries = null;
 
-        // Step 1: Validate current context
         yield return new GenerationProgress { Step = "validating", ProgressPercent = 10, Message = "正在分析当前报表..." };
 
         if (request.CurrentContext == null)
@@ -165,11 +217,9 @@ public class ReportGenerator
             yield break;
         }
 
-        // Step 2: Build refinement prompt
         yield return new GenerationProgress { Step = "building_prompt", ProgressPercent = 20, Message = "正在构建修改提示..." };
         var prompt = BuildRefinementPrompt(request);
 
-        // Step 3: Generate refined report (streaming)
         yield return new GenerationProgress { Step = "refining", ProgressPercent = 30, Message = "AI 正在修改报表..." };
         var reportJson = new StringBuilder();
 
@@ -184,16 +234,11 @@ public class ReportGenerator
             };
         }
 
-        // Step 4: Parse JSON response
         yield return new GenerationProgress { Step = "parsing", ProgressPercent = 80, Message = "正在解析修改结果..." };
 
         try
         {
-            // Try to parse as a complete refined result with pages and queries
-            var refinedResult = JsonSerializer.Deserialize<RefinedReportResult>(reportJson.ToString(), new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var refinedResult = DeserializeAiJson<AiReportResult>(reportJson.ToString());
 
             if (refinedResult?.Report != null)
             {
@@ -203,11 +248,7 @@ public class ReportGenerator
             }
             else
             {
-                // Fallback: try to parse as just a ReportDefinition
-                report = JsonSerializer.Deserialize<ReportDefinition>(reportJson.ToString(), new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                });
+                report = DeserializeAiJson<ReportDefinition>(reportJson.ToString());
                 pages = request.CurrentContext.Pages;
                 queries = request.CurrentContext.Queries;
             }
@@ -347,7 +388,8 @@ public class ReportGenerator
 
         sb.AppendLine();
         sb.AppendLine("## 输出要求");
-        sb.AppendLine("请生成符合以下 JSON Schema 的报表定义:");
+        sb.AppendLine("请生成完整报表结果 JSON，必须包含 report、pages、queries 三个字段。");
+        sb.AppendLine("页面数组不能为空；所有组件引用的 queryRef 都必须在 queries 数组中存在。");
         sb.AppendLine();
         sb.AppendLine(GetReportSchemaDescription());
 
@@ -358,18 +400,143 @@ public class ReportGenerator
     {
         return """
         {
-          "formatVersion": "1.0.0",
-          "id": "uuid",
-          "name": "报表名称",
-          "description": "报表描述",
-          "pages": ["page1"],
-          "defaultPage": "page1"
+          "report": {
+            "formatVersion": "1.0.0",
+            "id": "report-sales-overview",
+            "name": "销售概览",
+            "description": "根据模型自动生成的报表",
+            "createdAt": "2026-03-25T00:00:00Z",
+            "modifiedAt": "2026-03-25T00:00:00Z",
+            "generationMode": "ai-generated",
+            "pages": ["page-overview"],
+            "defaultPage": "page-overview"
+          },
+          "pages": [
+            {
+              "id": "page-overview",
+              "name": "概览",
+              "layout": {
+                "type": "grid",
+                "columns": 12,
+                "rowHeight": 60,
+                "gap": 16,
+                "padding": 24
+              },
+              "filters": [],
+              "components": [
+                {
+                  "id": "kpi-total-sales",
+                  "type": "kpi-card",
+                  "position": { "x": 0, "y": 0, "w": 3, "h": 2 },
+                  "queryRef": "q-total-sales",
+                  "config": {
+                    "title": "总销售额",
+                    "valueField": "Total Sales",
+                    "format": { "type": "currency", "currency": "CNY", "decimals": 0 }
+                  }
+                },
+                {
+                  "id": "chart-sales-trend",
+                  "type": "echarts",
+                  "position": { "x": 0, "y": 2, "w": 8, "h": 5 },
+                  "queryRef": "q-sales-trend",
+                  "config": {
+                    "title": "销售趋势",
+                    "chartType": "line",
+                    "xAxis": { "field": "Month", "type": "category" },
+                    "yAxis": [{ "field": "Total Sales", "type": "value", "name": "销售额" }],
+                    "series": [{ "field": "Total Sales", "type": "line", "name": "销售额", "smooth": true }]
+                  }
+                }
+              ]
+            }
+          ],
+          "queries": [
+            {
+              "id": "q-total-sales",
+              "name": "总销售额",
+              "dax": "EVALUATE ROW(\"Total Sales\", [Total Sales])",
+              "parameters": []
+            },
+            {
+              "id": "q-sales-trend",
+              "name": "销售趋势",
+              "dax": "EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], \"Total Sales\", [Total Sales])",
+              "parameters": []
+            }
+          ],
+          "message": "生成说明"
         }
         """;
     }
+
+    private static T? DeserializeAiJson<T>(string content)
+    {
+        var payload = ExtractJsonPayload(content);
+        return JsonSerializer.Deserialize<T>(payload, JsonOptions);
+    }
+
+    private static string ExtractJsonPayload(string content)
+    {
+        var trimmed = content.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return trimmed;
+        }
+
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstLineBreak = trimmed.IndexOf('\n');
+            if (firstLineBreak >= 0)
+            {
+                trimmed = trimmed[(firstLineBreak + 1)..];
+            }
+
+            var closingFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            if (closingFence >= 0)
+            {
+                trimmed = trimmed[..closingFence];
+            }
+
+            trimmed = trimmed.Trim();
+        }
+
+        var objectStart = trimmed.IndexOf('{');
+        var arrayStart = trimmed.IndexOf('[');
+        var startIndex = -1;
+
+        if (objectStart >= 0 && arrayStart >= 0)
+        {
+            startIndex = Math.Min(objectStart, arrayStart);
+        }
+        else if (objectStart >= 0)
+        {
+            startIndex = objectStart;
+        }
+        else if (arrayStart >= 0)
+        {
+            startIndex = arrayStart;
+        }
+
+        if (startIndex < 0)
+        {
+            return trimmed;
+        }
+
+        var startChar = trimmed[startIndex];
+        var endChar = startChar == '[' ? ']' : '}';
+        var endIndex = trimmed.LastIndexOf(endChar);
+
+        if (endIndex <= startIndex)
+        {
+            return trimmed[startIndex..];
+        }
+
+        return trimmed.Substring(startIndex, endIndex - startIndex + 1);
+    }
 }
 
-public record RefinedReportResult
+public record AiReportResult
 {
     public required ReportDefinition Report { get; init; }
     public List<PageDefinition>? Pages { get; init; }
@@ -395,7 +562,11 @@ public static class SystemPrompts
         - data-table: 数据表格
         - text: 文本组件
 
-        请只输出 JSON，不要包含任何其他文本。
+        你必须输出一个完整 JSON 对象，包含 report、pages、queries、message 四个字段。
+        report.pages 中出现的页面 ID 必须全部在 pages 数组中存在。
+        每个组件的 queryRef 必须能在 queries 数组中找到同名查询。
+        pages 不能为空；如果使用 echarts，config 中必须包含 chartType 与 series。
+        不要使用 Markdown 代码块，不要输出任何 JSON 之外的解释。
         """;
 
     public const string ReportRefinement = """

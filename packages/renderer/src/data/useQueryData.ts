@@ -89,7 +89,7 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
       return;
     }
 
-    console.log('[useQueryData] Fetching data for query:', query.id, query.name);
+    console.log('[useQueryData] Fetching data for query:', query.id);
 
     // Check cache
     const cached = cache.get(cacheKey);

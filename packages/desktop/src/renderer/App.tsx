@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ReportRenderer, primeQueryCache } from '@vibe-bi/renderer';
-import type { ReportDefinition, PageDefinition, QueryDefinition, ThemeDefinition, DataSourceConfig, QueryResult } from '@vibe-bi/core';
+import type { ChartType, ReportDefinition, PageDefinition, QueryDefinition, ThemeDefinition, DataSourceConfig, QueryResult } from '@vibe-bi/core';
 import {
   CommandButton,
   InfoPill,
@@ -17,108 +17,18 @@ import {
   WorkspaceWelcome,
   shellPalette,
 } from './components/DesktopShell';
-
-// Model metadata types
-interface TableMetadata {
-  name: string;
-  columns: string[];
-}
-
-interface MeasureMetadata {
-  name: string;
-  expression: string;
-  table: string;
-}
-
-interface ModelMetadata {
-  databaseName: string;
-  tables: TableMetadata[];
-  measures: MeasureMetadata[];
-  relationships: unknown[];
-}
-
-// Sample report for testing
-const sampleReport: ReportDefinition = {
-  formatVersion: '1.0.0',
-  id: 'test-report-001',
-  name: '测试报表',
-  description: '这是一个测试报表',
-  createdAt: new Date().toISOString(),
-  modifiedAt: new Date().toISOString(),
-  generationMode: 'manual',
-  pages: ['page1'],
-  defaultPage: 'page1',
-};
-
-const samplePage: PageDefinition = {
-  id: 'page1',
-  name: '概览',
-  layout: {
-    type: 'grid',
-    columns: 12,
-    rowHeight: 60,
-    gap: 16,
-    padding: 24,
-  },
-  filters: [],
-  components: [
-    {
-      id: 'kpi1',
-      type: 'kpi-card',
-      position: { x: 0, y: 0, w: 3, h: 2 },
-      queryRef: 'q1',
-      config: {
-        title: '总收入',
-        valueField: 'revenue',
-        format: { type: 'currency', currency: 'CNY', decimals: 0 },
-      },
-    },
-    {
-      id: 'chart1',
-      type: 'echarts',
-      position: { x: 0, y: 2, w: 8, h: 5 },
-      queryRef: 'q2',
-      config: {
-        chartType: 'line',
-        title: '月度趋势',
-        xAxis: { field: 'month', type: 'category' },
-        yAxis: [{ field: 'value', name: '收入', type: 'value' }],
-        series: [{ field: 'value', type: 'line', smooth: true }],
-      },
-    },
-    {
-      id: 'chart2',
-      type: 'echarts',
-      position: { x: 8, y: 2, w: 4, h: 5 },
-      queryRef: 'q3',
-      config: {
-        chartType: 'pie',
-        title: '分类占比',
-      },
-    },
-  ],
-};
-
-const sampleQueries: QueryDefinition[] = [
-  {
-    id: 'q1',
-    name: '总收入',
-    dax: 'EVALUATE SUMMARIZECOLUMNS("revenue", [Total Revenue])',
-    parameters: [],
-  },
-  {
-    id: 'q2',
-    name: '月度趋势',
-    dax: 'EVALUATE SUMMARIZECOLUMNS(Calendar[MonthName], "value", [Total Revenue])',
-    parameters: [],
-  },
-  {
-    id: 'q3',
-    name: '分类占比',
-    dax: 'EVALUATE SUMMARIZECOLUMNS(Products[Category], "value", [Total Revenue])',
-    parameters: [],
-  },
-];
+import { ShellIcon, type ShellIconName } from './components/ShellIcon';
+import { DataWorkbench } from './components/DataWorkbench';
+import type {
+  CustomDatasetDraft,
+  DatasetImportMode,
+  DatasetVisualType,
+  ImportSummaryItem,
+  ImportedVisualCategory,
+  ModelMetadata,
+  QueryBuilderDraft,
+  WorkspaceMode,
+} from './types/workspace';
 
 const sampleTheme: ThemeDefinition = {
   name: 'Vibe Desktop Light',
@@ -132,7 +42,7 @@ const sampleTheme: ThemeDefinition = {
     chart: ['#0F6CBD', '#8764B8', '#038387', '#CA5010', '#107C10', '#B146C2'],
   },
   typography: {
-    fontFamily: '"Segoe UI", "Segoe UI Variable", system-ui, sans-serif',
+    fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
   },
   components: {
     card: {
@@ -171,16 +81,81 @@ const sampleDataSource: DataSourceConfig = {
 };
 
 type QueryRow = Record<string, unknown>;
-type RibbonTabId = 'home' | 'data' | 'ai' | 'view';
+type RibbonTabId = 'home' | 'dataset' | 'ai' | 'view';
+type WorkspaceRailId = WorkspaceMode;
 type LeftPaneSectionId = 'start' | 'import' | 'ai' | 'model';
 type RightPaneTabId = 'visuals' | 'fields' | 'properties';
+type PowerBiScanItem = {
+  id: string;
+  processId: number;
+  windowTitle: string;
+  port: number;
+  connectionTarget: string;
+  label: string;
+};
+type DatasetDialogMode = 'import-json' | 'custom-dax' | 'query-builder';
+
+function quoteDaxString(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function quoteDaxIdentifier(tableName: string, fieldName: string): string {
+  return `'${tableName.replace(/'/g, "''")}'[${fieldName}]`;
+}
+
+function getQueryBuilderSelectionId(kind: 'column' | 'measure', tableName: string, name: string): string {
+  return `${kind}:${tableName}:${name}`;
+}
+
+function buildQueryBuilderDax(draft: QueryBuilderDraft): string {
+  if (draft.selections.length === 0 && draft.filters.length === 0) {
+    return 'EVALUATE ROW("Hint", "请从左侧拖入字段或度量值开始构建查询")';
+  }
+
+  const columnSelections = draft.selections.filter((selection) => selection.kind === 'column');
+  const measureSelections = draft.selections.filter((selection) => selection.kind === 'measure');
+  const args: string[] = [];
+  columnSelections.forEach((selection) => {
+    args.push(quoteDaxIdentifier(selection.tableName, selection.name));
+  });
+  draft.filters
+    .map((filter) => {
+      if (!filter.fieldName || !filter.value.trim()) {
+        return null;
+      }
+
+      const fieldRef = quoteDaxIdentifier(filter.tableName, filter.fieldName);
+      if (filter.operator === 'contains') {
+        return `KEEPFILTERS(FILTER(VALUES(${fieldRef}), CONTAINSSTRING(${fieldRef}, ${quoteDaxString(filter.value.trim())})))`;
+      }
+
+      return `KEEPFILTERS(FILTER(VALUES(${fieldRef}), ${fieldRef} = ${quoteDaxString(filter.value.trim())}))`;
+    })
+    .filter((value): value is string => Boolean(value))
+    .forEach((value) => {
+      args.push(value);
+    });
+  measureSelections.forEach((selection) => {
+    args.push(`${quoteDaxString(selection.name)}, ${quoteDaxIdentifier(selection.tableName, selection.name)}`);
+  });
+
+  if (args.length === 0) {
+    return 'EVALUATE ROW("Hint", "当前筛选条件缺少筛选值，暂时无法生成查询")';
+  }
+
+  return [
+    'EVALUATE',
+    'SUMMARIZECOLUMNS(',
+    args.map((item) => `  ${item}`).join(',\n'),
+    ')',
+  ].join('\n');
+}
 
 function createGradientIcon(
-  glyph: string,
+  icon: ShellIconName,
   start: string,
   end: string,
   size = 22,
-  fontSize = 12,
 ): React.ReactNode {
   return (
     <span
@@ -197,7 +172,6 @@ function createGradientIcon(
         background: 'linear-gradient(180deg, #FFFFFF 0%, #F4F7FB 100%)',
         border: '1px solid rgba(182, 190, 204, 0.92)',
         color: '#4B5563',
-        fontSize,
         fontWeight: 700,
         boxShadow: '0 4px 10px rgba(15, 23, 42, 0.08)',
       }}
@@ -213,23 +187,24 @@ function createGradientIcon(
           background: `linear-gradient(90deg, ${start} 0%, ${end} 100%)`,
         }}
       />
-      <span style={{ transform: 'translateY(1px)' }}>{glyph}</span>
+      <span style={{ transform: 'translateY(1px)' }}>
+        <ShellIcon name={icon} size={Math.round(size * 0.62)} />
+      </span>
     </span>
   );
 }
 
-function createMonoIcon(glyph: string, size = 16): React.ReactNode {
+function createMonoIcon(icon: ShellIconName, size = 16): React.ReactNode {
   return (
     <span
       aria-hidden="true"
       style={{
         color: 'currentColor',
-        fontSize: size,
-        fontWeight: 700,
         lineHeight: 1,
+        display: 'inline-flex',
       }}
     >
-      {glyph}
+      <ShellIcon name={icon} size={size} />
     </span>
   );
 }
@@ -350,7 +325,7 @@ function getPieCategoryFieldName(rows: QueryRow[], fieldNames: string[], valueFi
 
 function buildComponentConfig(
   componentType: PageDefinition['components'][number]['type'],
-  chartType: 'line' | 'bar' | 'pie',
+  chartType: ChartType,
   title: string,
   queryResult?: QueryResult
 ) {
@@ -429,6 +404,111 @@ function buildComponentConfig(
   };
 }
 
+function resolveComponentTypeFromDatasetChartType(chartType: DatasetVisualType): PageDefinition['components'][number]['type'] {
+  if (chartType === 'kpi-card') {
+    return 'kpi-card';
+  }
+  if (chartType === 'data-table') {
+    return 'data-table';
+  }
+  if (chartType === 'filter') {
+    return 'filter';
+  }
+  return 'echarts';
+}
+
+function createDatasetFields(result?: QueryResult) {
+  if (!result) {
+    return [];
+  }
+
+  return result.columns
+    .filter((column) => column.name !== '__rowIndex')
+    .map((column) => ({
+      name: column.name,
+      dataType: column.dataType,
+      isVisible: true,
+    }));
+}
+
+function filterQueryResultByVisibleFields(result: QueryResult | undefined, item: ImportSummaryItem): QueryResult | undefined {
+  if (!result) {
+    return undefined;
+  }
+
+  const visibleFieldNames = new Set(item.fields.filter((field) => field.isVisible).map((field) => field.name));
+  if (visibleFieldNames.size === 0) {
+    return undefined;
+  }
+
+  return {
+    ...result,
+    columns: result.columns.filter((column) => column.name === '__rowIndex' || visibleFieldNames.has(column.name)),
+    rows: result.rows.map((row) => Object.fromEntries(
+      Object.entries(row).filter(([key]) => key === '__rowIndex' || visibleFieldNames.has(key))
+    )),
+  };
+}
+
+function createDatasetAsset(input: {
+  id: string;
+  name: string;
+  type: string;
+  category: ImportedVisualCategory;
+  score: number;
+  rowCount: number;
+  executionTime: number;
+  fullQuery?: string;
+  executionDax?: string;
+  evaluateQueries?: string[];
+  selectedEvaluateIndex?: number;
+  queryId?: string;
+  componentId?: string;
+  hasQuery: boolean;
+  isRendered?: boolean;
+  sourceOrder: number;
+  queryMode: 'import-json' | 'custom-dax' | 'query-builder';
+  sourceLabel: string;
+  chartType: DatasetVisualType;
+  previewResult?: QueryResult;
+  isVisible?: boolean;
+}): ImportSummaryItem {
+  const componentType = resolveComponentTypeFromDatasetChartType(input.chartType);
+  const chartId = `${input.id}-chart-0`;
+  return {
+    id: input.id,
+    name: input.name,
+    type: input.type,
+    category: input.category,
+    score: input.score,
+    rowCount: input.rowCount,
+    executionTime: input.executionTime,
+    fullQuery: input.fullQuery,
+    executionDax: input.executionDax,
+    evaluateQueries: input.evaluateQueries,
+    selectedEvaluateIndex: input.selectedEvaluateIndex,
+    queryId: input.queryId,
+    componentId: input.componentId,
+    hasQuery: input.hasQuery,
+    isRendered: input.isRendered ?? false,
+    sourceOrder: input.sourceOrder,
+    queryMode: input.queryMode,
+    sourceLabel: input.sourceLabel,
+    isVisible: input.isVisible ?? (input.category !== 'functional' && input.category !== 'decorative'),
+    fields: createDatasetFields(input.previewResult),
+    charts: [
+      {
+        id: chartId,
+        name: `${input.name} 图表`,
+        componentType,
+        chartType: input.chartType,
+        isVisible: input.category !== 'functional' && input.category !== 'decorative',
+      },
+    ],
+    previewResult: input.previewResult,
+  };
+}
+
 type PerformanceAnalyzerEvent = {
   name?: string;
   id?: string;
@@ -452,27 +532,6 @@ type VisualMetadataCandidate = {
   isLifecycleEvent?: boolean;
   summaryKey?: string;
 };
-
-type ImportedVisualCategory = 'display' | 'functional' | 'decorative';
-
-interface ImportSummaryItem {
-  id: string;
-  name: string;
-  type: string;
-  category: ImportedVisualCategory;
-  score: number;
-  rowCount: number;
-  executionTime: number;
-  fullQuery?: string;
-  executionDax?: string;
-  evaluateQueries?: string[];
-  selectedEvaluateIndex?: number;
-  queryId?: string;
-  componentId?: string;
-  hasQuery: boolean;
-  isRendered: boolean;
-  sourceOrder: number;
-}
 
 function normalizeLookupToken(value: string): string {
   return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
@@ -868,6 +927,8 @@ function getVisualCategoryLabel(category: ImportedVisualCategory): string {
       return '展示型';
     case 'functional':
       return '功能型';
+    case 'custom':
+      return '自定义';
     case 'decorative':
     default:
       return '装饰型';
@@ -1013,6 +1074,7 @@ const defaultImportGroupCollapsedState: Record<ImportedVisualCategory, boolean> 
   display: true,
   functional: true,
   decorative: true,
+  custom: true,
 };
 
 function CopyTextButton({ value }: { value: string }) {
@@ -1071,7 +1133,12 @@ function ImportedDataViewer({ item, executeQuery }: ImportedDataViewerProps) {
     Math.max(evaluateQueries.length - 1, 0)
   );
   const [activeTab, setActiveTab] = useState(defaultTab);
-  const [resultsByTab, setResultsByTab] = useState<Record<number, { loading: boolean; rows?: QueryRow[]; error?: string }>>({});
+  const [resultsByTab, setResultsByTab] = useState<Record<number, {
+    loading: boolean;
+    rows?: QueryRow[];
+    columns?: string[];
+    error?: string;
+  }>>({});
 
   useEffect(() => {
     setActiveTab(defaultTab);
@@ -1105,6 +1172,7 @@ function ImportedDataViewer({ item, executeQuery }: ImportedDataViewerProps) {
           [activeTab]: {
             loading: false,
             rows: (result.rows || []) as QueryRow[],
+            columns: (result.columns || []).map((column) => column.name).filter((name) => name !== '__rowIndex'),
           },
         }));
       })
@@ -1128,7 +1196,9 @@ function ImportedDataViewer({ item, executeQuery }: ImportedDataViewerProps) {
   }, [activeQuery, activeResult, activeTab, executeQuery]);
 
   const previewRows = (activeResult?.rows || []).slice(0, 200);
-  const previewColumns = getPreviewColumnsFromRows(previewRows);
+  const previewColumns = activeResult?.columns && activeResult.columns.length > 0
+    ? activeResult.columns
+    : getPreviewColumnsFromRows(previewRows);
 
   if (evaluateQueries.length === 0) {
     return <div style={{ color: '#605E5C' }}>当前视觉对象没有可执行的查询。</div>;
@@ -1195,23 +1265,36 @@ function ImportedDataViewer({ item, executeQuery }: ImportedDataViewerProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {previewRows.map((row, index) => (
+                  {previewRows.length > 0 ? previewRows.map((row, index) => (
                     <tr key={(row.__rowIndex as string | number | undefined) ?? index}>
                       {previewColumns.map((column) => (
                         <td
                           key={`${index}-${column}`}
-                        style={{
-                          padding: '10px 12px',
-                          color: '#201F1E',
-                          borderBottom: '1px solid #E1DFDD',
-                          verticalAlign: 'top',
-                        }}
-                      >
+                          style={{
+                            padding: '10px 12px',
+                            color: '#201F1E',
+                            borderBottom: '1px solid #E1DFDD',
+                            verticalAlign: 'top',
+                          }}
+                        >
                           {typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column] ?? '')}
                         </td>
                       ))}
                     </tr>
-                  ))}
+                  )) : (
+                    <tr>
+                      <td
+                        colSpan={previewColumns.length}
+                        style={{
+                          padding: '14px 12px',
+                          color: '#605E5C',
+                          borderBottom: '1px solid #E1DFDD',
+                        }}
+                      >
+                        当前查询已成功执行，但没有返回数据行。
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1301,11 +1384,12 @@ function ImportInspectorModal({ state, onClose, executeQuery }: ImportInspectorM
                 background: 'transparent',
                 color: '#605E5C',
                 cursor: 'pointer',
-                fontSize: 20,
-                lineHeight: 1,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
             >
-              ×
+              <ShellIcon name="close" size={16} />
             </button>
           </div>
         </div>
@@ -1337,11 +1421,15 @@ export function App() {
   const [error, setError] = useState<string>('');
 
   // Connection state
-  const [connectionString, setConnectionString] = useState<string>('localhost:12345');
+  const [connectionString, setConnectionString] = useState<string>('');
   const [connectionDatabase, setConnectionDatabase] = useState<string>('');
   const [connectionMode, setConnectionMode] = useState<'pbi' | 'tabular'>('pbi');
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string>('');
+  const [isScanningPowerBi, setIsScanningPowerBi] = useState(false);
+  const [powerBiScanItems, setPowerBiScanItems] = useState<PowerBiScanItem[]>([]);
+  const [selectedPowerBiScanId, setSelectedPowerBiScanId] = useState<string>('');
+  const [powerBiScanMessage, setPowerBiScanMessage] = useState<string>('');
   const [modelMetadata, setModelMetadata] = useState<ModelMetadata | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [activeTab, setActiveTab] = useState<'tables' | 'measures'>('tables');
@@ -1368,12 +1456,28 @@ export function App() {
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState<string>('');
   const [importSummary, setImportSummary] = useState<ImportSummaryItem[]>([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState<string | undefined>(undefined);
   const [activeImportedComponentId, setActiveImportedComponentId] = useState<string | undefined>(undefined);
-  const [showInspectorActions, setShowInspectorActions] = useState(false);
   const [collapsedImportGroups, setCollapsedImportGroups] = useState<Record<ImportedVisualCategory, boolean>>(defaultImportGroupCollapsedState);
   const [importInspectorState, setImportInspectorState] = useState<ImportInspectorState | null>(null);
-  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const [datasetDialogMode, setDatasetDialogMode] = useState<DatasetDialogMode | null>(null);
+  const [jsonImportFilePath, setJsonImportFilePath] = useState('');
+  const [jsonImportClearOthers, setJsonImportClearOthers] = useState(false);
+  const [customDatasetDraft, setCustomDatasetDraft] = useState<CustomDatasetDraft>({
+    name: '',
+    dax: 'EVALUATE\nSUMMARIZECOLUMNS(\n  "Value", [Measure]\n)',
+    chartType: 'bar',
+  });
+  const [queryBuilderDraft, setQueryBuilderDraft] = useState<QueryBuilderDraft>({
+    name: '新查询',
+    selections: [],
+    filters: [],
+    chartType: 'bar',
+  });
+  const [queryBuilderSearch, setQueryBuilderSearch] = useState('');
+  const [queryBuilderExpandedTables, setQueryBuilderExpandedTables] = useState<Record<string, boolean>>({});
   const [activeRibbonTab, setActiveRibbonTab] = useState<RibbonTabId>('home');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('report');
   const [activeLeftPaneSection, setActiveLeftPaneSection] = useState<LeftPaneSectionId>('start');
   const [activeRightPaneTab, setActiveRightPaneTab] = useState<RightPaneTabId>('properties');
   const [showLeftPane] = useState(true);
@@ -1392,23 +1496,18 @@ export function App() {
   const [showChatPanel, setShowChatPanel] = useState(false);
 
   useEffect(() => {
-    console.log('App mounted, electronAPI:', window.electronAPI);
-
-    // Get API URL from main process
-    if (window.electronAPI?.getApiUrl) {
-      window.electronAPI.getApiUrl()
-        .then((url) => {
-          console.log('API URL received:', url);
-          setApiUrl(url);
-        })
-        .catch((err) => {
-          console.error('Failed to get API URL:', err);
-          setError(String(err));
-        });
-    } else {
-      console.error('electronAPI not available');
-      setError('electronAPI not available');
+    if (!window.electronAPI?.getApiUrl) {
+      setError('桌面 API 不可用，请确认 Electron preload 已正确加载。');
+      return;
     }
+
+    window.electronAPI.getApiUrl()
+      .then((url) => {
+        setApiUrl(url);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const buildModelConnectionString = () => {
@@ -1433,7 +1532,263 @@ export function App() {
 
   const handleOpenConnectDialog = () => {
     setConnectionError('');
+    setPowerBiScanMessage('');
     setShowConnectDialog(true);
+  };
+
+  const handleSelectPowerBiScanItem = (itemId: string) => {
+    setSelectedPowerBiScanId(itemId);
+    const selectedItem = powerBiScanItems.find((item) => item.id === itemId);
+    if (!selectedItem) {
+      return;
+    }
+
+    setConnectionString(selectedItem.connectionTarget);
+    setConnectionDatabase('');
+  };
+
+  const handleScanPowerBi = async () => {
+    if (!window.electronAPI?.scanPowerBiInstances) {
+      setPowerBiScanMessage('当前环境不支持自动扫描 Power BI Desktop。');
+      return;
+    }
+
+    setIsScanningPowerBi(true);
+    setPowerBiScanMessage('');
+    setConnectionError('');
+
+    try {
+      const items = await window.electronAPI.scanPowerBiInstances();
+      setPowerBiScanItems(items);
+
+      if (items.length === 0) {
+        setSelectedPowerBiScanId('');
+        setPowerBiScanMessage('未找到已打开的 Power BI Desktop 窗口。');
+        return;
+      }
+
+      const preferredItem = items.find((item) => item.connectionTarget === connectionString.trim()) || items[0];
+      setSelectedPowerBiScanId(preferredItem.id);
+      setConnectionString(preferredItem.connectionTarget);
+      setConnectionDatabase('');
+      setPowerBiScanMessage(`已找到 ${items.length} 个 Power BI 模型。`);
+    } catch (err) {
+      setPowerBiScanItems([]);
+      setSelectedPowerBiScanId('');
+      setPowerBiScanMessage(err instanceof Error ? err.message : '扫描 Power BI Desktop 失败。');
+    } finally {
+      setIsScanningPowerBi(false);
+    }
+  };
+
+  const handleOpenSettings = () => {
+    setShowSettings(true);
+    setAiTestStatus('idle');
+    setAiTestMessage('');
+  };
+
+  const activateDataWorkbench = () => {
+    setWorkspaceMode('data');
+    setActiveRibbonTab('dataset');
+    setShowRightPane(false);
+  };
+
+  const openDatasetDialog = (mode: DatasetDialogMode) => {
+    activateDataWorkbench();
+    setImportError('');
+    if (mode === 'import-json') {
+      setJsonImportClearOthers(false);
+    }
+    if (mode === 'query-builder') {
+      setQueryBuilderSearch('');
+    }
+    setDatasetDialogMode(mode);
+  };
+
+  const closeDatasetDialog = () => {
+    setDatasetDialogMode(null);
+  };
+
+  const handleChooseJsonImportFile = async () => {
+    if (!window.electronAPI?.selectFile) {
+      setImportError('当前环境不支持文件选择。');
+      return;
+    }
+
+    const selectedPath = await window.electronAPI.selectFile({
+      title: '选择 Performance Analyzer JSON',
+      filters: [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+
+    if (selectedPath) {
+      setJsonImportFilePath(selectedPath);
+    }
+  };
+
+  const appendQueryBuilderSelection = (selection: QueryBuilderDraft['selections'][number]) => {
+    setQueryBuilderDraft((previous) => (
+      previous.selections.some((item) => item.id === selection.id)
+        ? previous
+        : { ...previous, selections: [...previous.selections, selection] }
+    ));
+  };
+
+  const handleToggleQueryBuilderSelection = (selection: QueryBuilderDraft['selections'][number]) => {
+    setQueryBuilderDraft((previous) => ({
+      ...previous,
+      selections: previous.selections.some((item) => item.id === selection.id)
+        ? previous.selections.filter((item) => item.id !== selection.id)
+        : [...previous.selections, selection],
+    }));
+  };
+
+  const handleAddQueryBuilderFilter = (
+    source?: {
+      id: string;
+      tableName: string;
+      name: string;
+      dataType?: string;
+      kind?: 'column' | 'measure';
+    },
+  ) => {
+    if (source?.kind === 'measure') {
+      setImportError('筛选条件仅支持字段列，不支持度量值。');
+      return;
+    }
+
+    const fallbackColumn = allQueryBuilderColumns[0];
+    const targetField = source || fallbackColumn;
+    if (!targetField) {
+      return;
+    }
+
+    setQueryBuilderDraft((previous) => ({
+      ...previous,
+      filters: [
+        ...previous.filters,
+        {
+          id: `filter-${Date.now()}`,
+          fieldId: targetField.id,
+          tableName: targetField.tableName,
+          fieldName: targetField.name,
+          dataType: targetField.dataType || 'String',
+          operator: 'equals',
+          value: '',
+        },
+      ],
+    }));
+  };
+
+  const handleChangeQueryBuilderFilter = (
+    filterId: string,
+    patch: Partial<QueryBuilderDraft['filters'][number]>,
+  ) => {
+    setQueryBuilderDraft((previous) => ({
+      ...previous,
+      filters: previous.filters.map((filter) => (
+        filter.id === filterId ? { ...filter, ...patch } : filter
+      )),
+    }));
+  };
+
+  const handleRemoveQueryBuilderFilter = (filterId: string) => {
+    setQueryBuilderDraft((previous) => ({
+      ...previous,
+      filters: previous.filters.filter((filter) => filter.id !== filterId),
+    }));
+  };
+
+  const handleToggleQueryBuilderTableExpanded = (tableKey: string) => {
+    setQueryBuilderExpandedTables((previous) => ({
+      ...previous,
+      [tableKey]: !previous[tableKey],
+    }));
+  };
+
+  const handleQueryBuilderDragStart = (
+    event: React.DragEvent<HTMLElement>,
+    item: QueryBuilderDraft['selections'][number],
+  ) => {
+    event.dataTransfer.setData('application/x-vibe-bi-query-builder-item', JSON.stringify(item));
+    event.dataTransfer.effectAllowed = 'copy';
+  };
+
+  const readQueryBuilderDraggedItem = (event: React.DragEvent<HTMLElement>) => {
+    const raw = event.dataTransfer.getData('application/x-vibe-bi-query-builder-item');
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw) as QueryBuilderDraft['selections'][number];
+    } catch {
+      return null;
+    }
+  };
+
+  const handleDropQueryBuilderSelection = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    const item = readQueryBuilderDraggedItem(event);
+    if (!item) {
+      return;
+    }
+    appendQueryBuilderSelection(item);
+  };
+
+  const handleDropQueryBuilderFilter = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    const item = readQueryBuilderDraggedItem(event);
+    if (!item) {
+      return;
+    }
+    handleAddQueryBuilderFilter(item);
+  };
+
+  const handleWorkspaceModeChange = (mode: WorkspaceRailId) => {
+    if (mode === 'data') {
+      activateDataWorkbench();
+      if (!selectedDatasetId && importSummary[0]) {
+        setSelectedDatasetId(importSummary[0].id);
+      }
+      return;
+    }
+
+    setWorkspaceMode('report');
+    setShowRightPane(true);
+    if (activeRibbonTab === 'dataset') {
+      setActiveRibbonTab('view');
+    }
+    if (activeLeftPaneSection === 'import') {
+      setActiveLeftPaneSection('start');
+    }
+  };
+
+  const handleRibbonTabChange = (tab: RibbonTabId) => {
+    setActiveRibbonTab(tab);
+
+    if (tab === 'ai') {
+      setWorkspaceMode('report');
+      setActiveLeftPaneSection('ai');
+      setShowRightPane(true);
+      return;
+    }
+
+    if (tab === 'view') {
+      setWorkspaceMode('report');
+      setActiveLeftPaneSection('start');
+      setShowRightPane(true);
+      return;
+    }
+
+    if (tab === 'home') {
+      setActiveLeftPaneSection('start');
+      if (workspaceMode === 'report') {
+        setShowRightPane(true);
+      }
+    }
   };
 
   // Connect to Power BI Desktop
@@ -1547,19 +1902,22 @@ export function App() {
   };
 
   // Import Performance Analyzer JSON
-  const handleImportPerformanceAnalyzer = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file || !isConnected || !apiUrl) return;
+  const importPerformanceAnalyzerContent = async (
+    fileName: string,
+    content: string,
+    mode: DatasetImportMode,
+  ): Promise<boolean> => {
+    if (!fileName || !isConnected || !apiUrl) {
+      return false;
+    }
 
     setIsImporting(true);
     setImportError('');
     setGenerationProgress('正在解析 Performance Analyzer 文件...');
-    setActiveLeftPaneSection('import');
-    setShowRightPane(true);
+    activateDataWorkbench();
 
     try {
-      const content = await file.text();
-      const perfData = JSON.parse(content);
+      const perfData = JSON.parse(content.replace(/^\uFEFF/, ''));
 
       // Parse Power BI Performance Analyzer JSON format:
       // { "version": "1.1.0", "events": [{ "name": "Execute DAX Query", "metrics": { "QueryText": "..." } }] }
@@ -1664,9 +2022,8 @@ export function App() {
       console.log(`[VisualMap] Total visuals found: ${visualMap.size}`);
 
       // Step 2: Extract DAX queries from "Execute DAX Query" events and map them back to visuals
-      const visualQueries: QueryDefinition[] = [];
-      const components: PageDefinition['components'] = [];
-      let yPos = 0;
+      const importBatchId = Date.now();
+      const datasetAssets: ImportSummaryItem[] = [];
 
       // Type importance weights for filtering
       const typeWeights: Record<string, number> = {
@@ -2125,7 +2482,8 @@ export function App() {
       // Second pass: execute imported DAX and create components from actual query results
       for (const [filteredIndex, candidate] of renderableVisuals.entries()) {
         const { visualName, visualType, queryText, score, rowCount, executionTime } = candidate;
-        const queryId = `q_${filteredIndex}`;
+        const assetId = `dataset-${importBatchId}-${candidate.summaryKey}`;
+        const queryId = `dataset-q-${importBatchId}-${filteredIndex}`;
         const { componentType, chartType } = resolveVisualPresentation(visualType);
         const evaluateQueries = splitDaxEvaluateCandidates(queryText);
         console.log(
@@ -2149,38 +2507,42 @@ export function App() {
           console.error(`[Import] Query execution failed for "${visualName}":`, queryErr);
         }
 
-        visualQueries.push({
-          id: queryId,
+        const datasetChartType: DatasetVisualType = componentType === 'kpi-card'
+          ? 'kpi-card'
+          : componentType === 'data-table'
+            ? 'data-table'
+            : componentType === 'filter'
+              ? 'filter'
+              : chartType;
+
+        datasetAssets.push(createDatasetAsset({
+          id: assetId,
           name: visualName,
-          dax: queryText,
+          type: visualType,
+          category: candidate.category,
+          score,
+          rowCount: queryResult?.rowCount || rowCount,
+          executionTime,
+          fullQuery: queryText,
           executionDax: selectedDax,
           evaluateQueries,
           selectedEvaluateIndex,
-          parameters: [],
-        });
-
-        const componentId = `comp_${filteredIndex}`;
-        const componentHeight = componentType === 'kpi-card' ? 2 : componentType === 'data-table' ? 6 : 5;
-        components.push({
-          id: componentId,
-          type: componentType as PageDefinition['components'][number]['type'],
-          position: { x: 0, y: yPos, w: 12, h: componentHeight },
-          queryRef: queryId,
-          config: buildComponentConfig(
-            componentType as PageDefinition['components'][number]['type'],
-            chartType as 'line' | 'bar' | 'pie',
-            visualName,
-            queryResult
-          ),
-        });
+          queryId,
+          hasQuery: true,
+          isRendered: false,
+          sourceOrder: candidate.sourceOrder,
+          queryMode: 'import-json',
+          sourceLabel: `Performance Analyzer · ${fileName}`,
+          chartType: datasetChartType,
+          previewResult: queryResult,
+        }));
 
         upsertSummaryItem(candidate.summaryKey, candidate.sourceOrder, {
           name: visualName,
           type: visualType,
           hasQuery: true,
-          isRendered: true,
+          isRendered: false,
           queryId,
-          componentId,
           score,
           rowCount: queryResult?.rowCount || rowCount,
           executionTime,
@@ -2189,96 +2551,349 @@ export function App() {
           evaluateQueries,
           selectedEvaluateIndex,
         });
-
-        yPos += componentHeight;
       }
 
-      if (visualQueries.length === 0) {
+      if (datasetAssets.length === 0) {
         throw new Error('未找到有效的 DAX 查询（请确保文件包含 "Execute DAX Query" 事件）');
       }
 
-      // Create report from imported data
-      const reportId = `imported-${Date.now()}`;
-      const pageId = `page-${Date.now()}`;
-
-      setGeneratedReport({
-        formatVersion: '1.0.0',
-        id: reportId,
-        name: `导入: ${file.name.replace('.json', '')}`,
-        description: `从 Performance Analyzer 导入的报表 (${visualQueries.length} 个视觉对象)`,
-        createdAt: new Date().toISOString(),
-        modifiedAt: new Date().toISOString(),
-        generationMode: 'imported',
-        pages: [pageId],
-        defaultPage: pageId,
+      setImportSummary((previous) => {
+        const nextItems = mode === 'replace'
+          ? datasetAssets
+          : [...previous, ...datasetAssets];
+        return nextItems.sort((a, b) => a.sourceOrder - b.sourceOrder);
       });
-
-      setGeneratedPages([{
-        id: pageId,
-        name: '导入的报表',
-        layout: {
-          type: 'grid',
-          columns: 12,
-          rowHeight: 60,
-          gap: 16,
-          padding: 24,
-        },
-        filters: [],
-        components,
-      }]);
-
-      setGeneratedQueries(visualQueries);
-      setImportSummary(Array.from(summaryMap.values()).sort((a, b) => a.sourceOrder - b.sourceOrder));
-      setActiveImportedComponentId(components[0]?.id);
-      setShowInspectorActions(false);
+      setSelectedDatasetId(datasetAssets[0]?.id);
+      setActiveImportedComponentId(undefined);
       setCollapsedImportGroups(defaultImportGroupCollapsedState);
       setImportInspectorState(null);
-      setGenerationProgress(`成功识别 ${summaryMap.size} 个视觉对象，生成 ${visualQueries.length} 个图表`);
+      setGenerationProgress(`成功识别 ${summaryMap.size} 个视觉对象，创建 ${datasetAssets.length} 个数据集素材`);
+      return true;
 
     } catch (err) {
       setImportError(err instanceof Error ? err.message : '导入失败');
       setGenerationProgress('');
+      return false;
     } finally {
       setIsImporting(false);
-      // Reset file input
-      event.target.value = '';
     }
+  };
+
+  const appendDatasetAsset = (asset: ImportSummaryItem) => {
+    setImportSummary((previous) => [...previous, asset].sort((a, b) => a.sourceOrder - b.sourceOrder));
+    setSelectedDatasetId(asset.id);
+    activateDataWorkbench();
+  };
+
+  const handleImportJsonFromDialog = async () => {
+    if (!jsonImportFilePath) {
+      setImportError('请选择要导入的 JSON 文件。');
+      return;
+    }
+
+    if (!window.electronAPI?.readTextFile) {
+      setImportError('当前环境不支持读取本地文件，请重启桌面端后重试。');
+      return;
+    }
+
+    setImportError('');
+
+    try {
+      const fileContent = await window.electronAPI.readTextFile(jsonImportFilePath);
+      if (fileContent == null) {
+        setImportError('读取 JSON 文件失败。');
+        return;
+      }
+
+      const imported = await importPerformanceAnalyzerContent(
+        jsonImportFilePath.split(/[/\\\\]/).pop() || jsonImportFilePath,
+        fileContent,
+        jsonImportClearOthers ? 'replace' : 'incremental',
+      );
+
+      if (imported) {
+        closeDatasetDialog();
+        setJsonImportFilePath('');
+        setJsonImportClearOthers(false);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('read-text-file')) {
+        setImportError('桌面端主进程尚未刷新，请重启 Vibe BI 后再导入。');
+        return;
+      }
+
+      setImportError(message || '导入 JSON 失败。');
+    }
+  };
+
+  const handleCreateCustomDataset = async (draft: CustomDatasetDraft) => {
+    const trimmedDax = draft.dax.trim();
+    if (!trimmedDax) {
+      return;
+    }
+
+    setIsImporting(true);
+    setImportError('');
+    setGenerationProgress(`正在执行自定义 DAX: ${draft.name}...`);
+
+    try {
+      const result = await executeImportedQuery(trimmedDax);
+      const asset = createDatasetAsset({
+        id: `custom-${Date.now()}`,
+        name: draft.name,
+        type: 'customQuery',
+        category: 'custom',
+        score: Math.max(result.rowCount > 0 ? 8 : 4, 6),
+        rowCount: result.rowCount,
+        executionTime: result.executionTimeMs,
+        fullQuery: trimmedDax,
+        executionDax: trimmedDax,
+        evaluateQueries: [trimmedDax],
+        selectedEvaluateIndex: 0,
+        queryId: `custom-q-${Date.now()}`,
+        hasQuery: true,
+        isRendered: false,
+        sourceOrder: Date.now(),
+        queryMode: 'custom-dax',
+        sourceLabel: '自定义 DAX',
+        chartType: draft.chartType,
+        previewResult: result,
+      });
+      primeQueryCache(asset.queryId!, result.rows);
+      appendDatasetAsset(asset);
+      setGenerationProgress(`已创建自定义数据集: ${draft.name}`);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '执行自定义 DAX 失败');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleCreateQueryBuilderDataset = async (draft: QueryBuilderDraft) => {
+    await handleCreateCustomDataset({
+      name: draft.name,
+      dax: buildQueryBuilderDax(draft),
+      chartType: draft.chartType,
+    });
+  };
+
+  const handleCreateCustomDatasetFromDialog = async () => {
+    if (!customDatasetDraft.dax.trim()) {
+      setImportError('请输入要执行的 DAX 查询。');
+      return;
+    }
+
+    closeDatasetDialog();
+    await handleCreateCustomDataset({
+      ...customDatasetDraft,
+      name: customDatasetDraft.name.trim() || '自定义数据集',
+    });
+    setCustomDatasetDraft((previous) => ({
+      ...previous,
+      name: '',
+    }));
+  };
+
+  const handleCreateQueryBuilderDatasetFromDialog = async () => {
+    const hasSelections = queryBuilderDraft.selections.length > 0;
+    const hasValidFilters = queryBuilderDraft.filters.some((filter) => filter.value.trim());
+    if (!hasSelections && !hasValidFilters) {
+      setImportError('请先添加字段、度量值或筛选条件。');
+      return;
+    }
+
+    closeDatasetDialog();
+    await handleCreateQueryBuilderDataset({
+      ...queryBuilderDraft,
+      name: queryBuilderDraft.name.trim() || '查询生成器数据集',
+    });
+    setQueryBuilderDraft((previous) => ({
+      ...previous,
+      name: '新查询',
+      selections: [],
+      filters: [],
+    }));
+  };
+
+  const handleSelectDataset = (datasetId: string) => {
+    setSelectedDatasetId(datasetId);
+    const selected = importSummary.find((item) => item.id === datasetId);
+    if (selected?.componentId) {
+      setActiveImportedComponentId(selected.componentId);
+    } else {
+      setActiveImportedComponentId(undefined);
+    }
+  };
+
+  const updateDatasetAsset = (datasetId: string, updater: (item: ImportSummaryItem) => ImportSummaryItem) => {
+    setImportSummary((previous) => previous.map((item) => (
+      item.id === datasetId ? updater(item) : item
+    )));
+  };
+
+  const handleRenameDataset = (datasetId: string, name: string) => {
+    updateDatasetAsset(datasetId, (item) => ({ ...item, name, charts: item.charts.map((chart) => ({ ...chart, name: `${name} 图表` })) }));
+  };
+
+  const handleDuplicateDataset = (datasetId: string) => {
+    const target = importSummary.find((item) => item.id === datasetId);
+    if (!target) {
+      return;
+    }
+
+    const duplicatedId = `${target.id}-copy-${Date.now()}`;
+    appendDatasetAsset({
+      ...target,
+      id: duplicatedId,
+      name: `${target.name} 副本`,
+      queryId: target.queryId ? `${target.queryId}-copy-${Date.now()}` : undefined,
+      charts: target.charts.map((chart) => ({
+        ...chart,
+        id: `${duplicatedId}-${chart.id}`,
+        name: `${target.name} 副本图表`,
+      })),
+      sourceOrder: Date.now(),
+      isRendered: false,
+    });
+  };
+
+  const handleDeleteDataset = (datasetId: string) => {
+    setImportSummary((previous) => previous.filter((item) => item.id !== datasetId));
+    setSelectedDatasetId((previous) => (previous === datasetId ? undefined : previous));
+  };
+
+  const handleRefreshDataset = async (datasetId: string) => {
+    const target = importSummary.find((item) => item.id === datasetId);
+    if (!target?.executionDax && !target?.fullQuery) {
+      return;
+    }
+
+    setIsImporting(true);
+    setGenerationProgress(`正在刷新数据集: ${target.name}...`);
+    try {
+      const dax = target.executionDax || target.fullQuery || '';
+      const result = await executeImportedQuery(dax);
+      updateDatasetAsset(datasetId, (item) => ({
+        ...item,
+        rowCount: result.rowCount,
+        executionTime: result.executionTimeMs,
+        previewResult: result,
+        fields: item.fields.length > 0
+          ? item.fields.map((field) => {
+              const nextColumn = result.columns.find((column) => column.name === field.name);
+              return nextColumn ? { ...field, dataType: nextColumn.dataType } : field;
+            })
+          : createDatasetFields(result),
+      }));
+      if (target.queryId) {
+        primeQueryCache(target.queryId, result.rows);
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '刷新数据集失败');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleToggleDatasetVisibility = (datasetId: string) => {
+    updateDatasetAsset(datasetId, (item) => ({ ...item, isVisible: !item.isVisible }));
+  };
+
+  const handleToggleChartVisibility = (datasetId: string, chartId: string) => {
+    updateDatasetAsset(datasetId, (item) => ({
+      ...item,
+      charts: item.charts.map((chart) => (
+        chart.id === chartId ? { ...chart, isVisible: !chart.isVisible } : chart
+      )),
+    }));
+  };
+
+  const handleChangeChartType = (datasetId: string, chartId: string, chartType: DatasetVisualType) => {
+    updateDatasetAsset(datasetId, (item) => ({
+      ...item,
+      charts: item.charts.map((chart) => (
+        chart.id === chartId
+          ? {
+              ...chart,
+              chartType,
+              componentType: resolveComponentTypeFromDatasetChartType(chartType),
+            }
+          : chart
+      )),
+    }));
+  };
+
+  const handleToggleFieldVisibility = (datasetId: string, fieldName: string) => {
+    updateDatasetAsset(datasetId, (item) => ({
+      ...item,
+      fields: item.fields.map((field) => (
+        field.name === fieldName ? { ...field, isVisible: !field.isVisible } : field
+      )),
+    }));
   };
 
   // AI Generate from Import - use imported DAX queries to generate optimized report
   const handleAiGenerateFromImport = async () => {
-    const importableVisuals = importSummary.filter((item) => item.category === 'display' && item.hasQuery && item.fullQuery);
-    if (!apiUrl || !isConnected || importableVisuals.length === 0) return;
+    const importableVisuals = importSummary.filter((item) => (
+      item.isVisible
+      && item.hasQuery
+      && Boolean(item.fullQuery || item.executionDax)
+      && item.charts.some((chart) => chart.isVisible)
+      && item.fields.some((field) => field.isVisible)
+    ));
+    setWorkspaceMode('report');
+    setActiveRibbonTab('ai');
+    setActiveLeftPaneSection('ai');
+    setShowRightPane(true);
+
+    if (!apiUrl) {
+      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
+      return;
+    }
+
+    if (!isConnected) {
+      setGenerationProgress('请先连接模型，再使用 AI 生成。');
+      return;
+    }
+
+    if (importableVisuals.length === 0) {
+      setGenerationProgress('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
+      return;
+    }
 
     const apiKey = localStorage.getItem('vibeBiAiApiKey');
     if (!apiKey) {
       setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
-      setShowSettings(true);
+      handleOpenSettings();
       return;
     }
 
     setIsGenerating(true);
-    setGenerationProgress('正在分析导入的数据...');
-    setActiveLeftPaneSection('ai');
+    setGenerationProgress('正在分析当前可见的数据集素材...');
 
     try {
-      // Build prompt from imported visuals
       const promptLines: string[] = [];
-      promptLines.push('基于以下从 Power BI 导入的视觉对象，生成一个现代化的报表：');
+      promptLines.push('基于以下数据集素材，生成一个现代化的 Power BI Desktop 风格报表。');
       promptLines.push('');
-      promptLines.push('### 可用视觉对象');
+      promptLines.push('### 可用数据集与图表素材');
       importableVisuals.forEach((item, idx) => {
-        promptLines.push(`${idx + 1}. ${item.name} (${item.type})`);
+        const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
+        const visibleFields = item.fields.filter((field) => field.isVisible).map((field) => field.name);
+        const dax = item.executionDax || item.fullQuery || '';
+
+        promptLines.push(`${idx + 1}. ${item.name} (${visibleChart?.chartType || item.type})`);
         promptLines.push(`   数据行数: ${item.rowCount}, 执行时间: ${item.executionTime.toFixed(0)}ms`);
-        promptLines.push(`   DAX: ${item.fullQuery!.slice(0, 150)}${item.fullQuery!.length > 150 ? '...' : ''}`);
+        promptLines.push(`   可见字段: ${visibleFields.join(', ') || '无'}`);
+        promptLines.push(`   DAX: ${dax.slice(0, 150)}${dax.length > 150 ? '...' : ''}`);
         promptLines.push('');
       });
       promptLines.push('');
       promptLines.push('要求：');
-      promptLines.push('1. 根据 DAX 查询的语义选择合适的图表类型（如趋势数据用折线图、占比用饼图等）');
-      promptLines.push('2. 使用美观的现代化布局，重要的图表占更大空间');
-      promptLines.push('3. 保持数据的逻辑关联性，相关的图表放在一起');
-      promptLines.push('4. 添加清晰的标题和标签');
+      promptLines.push('1. 保持 Power BI Desktop 的专业感，但排版更现代、信息层级更清晰');
+      promptLines.push('2. 只使用上述可见数据集、可见图表、可见字段');
+      promptLines.push('3. 根据图表语义安排版式，重要素材优先获得更大空间');
+      promptLines.push('4. 输出应便于继续做提示词反向编辑和手工微调');
 
       const prompt = promptLines.join('\n');
 
@@ -2325,82 +2940,64 @@ export function App() {
               setGenerationProgress(progress.message || progress.step);
 
               if (progress.step === 'complete' && progress.report) {
-                // 使用 AI 生成的 report，但需要基于导入的数据创建 pages
                 const reportId = progress.report.id || `ai-generated-${Date.now()}`;
                 const pageId = `page-${Date.now()}`;
-
-                // 基于导入的 summary 创建新的查询和组件
                 const newQueries: QueryDefinition[] = [];
                 const newComponents: PageDefinition['components'] = [];
                 const renderedSummaryMap = new Map<string, { queryId: string; componentId: string }>();
                 let yPos = 0;
 
                 importableVisuals.forEach((item, idx) => {
-                  const queryId = `q_${idx}`;
+                  const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
+                  if (!visibleChart) {
+                    return;
+                  }
+
+                  const filteredResult = filterQueryResultByVisibleFields(item.previewResult, item);
+                  const queryText = item.executionDax || item.fullQuery || '';
+                  const queryId = item.queryId || `q_${idx}`;
+                  const componentId = `comp_${idx}`;
+                  const componentType = visibleChart.componentType === 'filter' ? 'data-table' : visibleChart.componentType;
+                  const chartType = visibleChart.chartType === 'pie'
+                    ? 'pie'
+                    : visibleChart.chartType === 'line'
+                      ? 'line'
+                      : visibleChart.chartType === 'area'
+                        ? 'area'
+                        : visibleChart.chartType === 'scatter'
+                          ? 'scatter'
+                          : 'bar';
+
+                  if (!queryText) {
+                    return;
+                  }
 
                   newQueries.push({
                     id: queryId,
                     name: item.name,
-                    dax: item.fullQuery!,
-                    executionDax: item.executionDax || item.fullQuery!,
+                    dax: queryText,
+                    executionDax: queryText,
                     evaluateQueries: item.evaluateQueries,
                     selectedEvaluateIndex: item.selectedEvaluateIndex,
                     parameters: [],
                   });
 
-                  // 根据类型推断最佳组件类型
-                  // Power BI visual types: clusteredColumnChart, lineChart, pieChart, card, table, matrix, slicer
-                  let componentType = 'data-table';
-                  let chartType = 'bar';
-
-                  const visualType = item.type.toLowerCase();
-                  console.log(`[AI Generate] Visual ${idx}: name="${item.name}", type="${item.type}" (lower="${visualType}")`);
-
-                  if (visualType.includes('line') || visualType.includes('area')) {
-                    componentType = 'echarts';
-                    chartType = 'line';
-                  } else if (visualType.includes('column') || visualType.includes('bar') || visualType.includes('clustered')) {
-                    componentType = 'echarts';
-                    chartType = 'bar';
-                  } else if (visualType.includes('pie') || visualType.includes('doughnut') || visualType.includes('donut')) {
-                    componentType = 'echarts';
-                    chartType = 'pie';
-                  } else if (visualType.includes('card') || visualType.includes('kpi') || visualType.includes('single')) {
-                    componentType = 'kpi-card';
-                  } else if (visualType.includes('table') || visualType.includes('matrix')) {
-                    componentType = 'data-table';
-                  } else {
-                    // 默认为柱状图而不是表格
-                    componentType = 'echarts';
-                    chartType = 'bar';
-                  }
-
-                  console.log(`[AI Generate] Selected componentType="${componentType}", chartType="${chartType}"`);
-
-                  // 根据重要性分数决定组件大小
                   const isHighPriority = item.score >= 15;
-                  const height = componentType === 'kpi-card' ? 2 : isHighPriority ? 6 : 4;
-                  const width = isHighPriority ? 12 : 6;
-
-                  const componentId = `comp_${idx}`;
+                  const height = componentType === 'kpi-card' ? 2 : componentType === 'data-table' ? 5 : isHighPriority ? 6 : 4;
+                  const width = componentType === 'kpi-card' ? 4 : isHighPriority ? 12 : 6;
 
                   newComponents.push({
                     id: componentId,
                     type: componentType,
                     position: { x: 0, y: yPos, w: width, h: height },
                     queryRef: queryId,
-                    config: {
-                      title: item.name,
-                      ...(componentType === 'echarts' ? {
-                        chartType,
-                        // Leave fields empty for auto-detection from data
-                        series: [],
-                      } : {}),
-                      ...(componentType === 'kpi-card' ? { valueField: '' } : {}),
-                      ...(componentType === 'data-table' ? { columns: [] } : {}),
-                    },
+                    config: buildComponentConfig(componentType, chartType, item.name, filteredResult),
                   });
                   renderedSummaryMap.set(item.id, { queryId, componentId });
+
+                  if (filteredResult) {
+                    primeQueryCache(queryId, filteredResult.rows);
+                  }
 
                   yPos += height;
                 });
@@ -2408,8 +3005,8 @@ export function App() {
                 setGeneratedReport({
                   ...progress.report,
                   id: reportId,
-                  name: progress.report.name || `AI生成: ${importSummary.length}个视觉对象`,
-                  description: progress.report.description || `基于 Performance Analyzer 导入数据智能生成的报表`,
+                  name: progress.report.name || `AI生成: ${importableVisuals.length} 个数据集素材`,
+                  description: progress.report.description || '基于当前可见数据集素材自动生成的报表',
                   pages: [pageId],
                   defaultPage: pageId,
                 });
@@ -2433,12 +3030,13 @@ export function App() {
                   const rendered = renderedSummaryMap.get(item.id);
                   return {
                     ...item,
-                    queryId: rendered?.queryId,
+                    queryId: rendered?.queryId || item.queryId,
                     componentId: rendered?.componentId,
                     isRendered: Boolean(rendered),
                   };
                 }));
                 setActiveImportedComponentId(newComponents[0]?.id);
+                setWorkspaceMode('report');
                 setGenerationProgress(`生成完成！已创建 ${newQueries.length} 个查询，${newComponents.length} 个组件`);
               } else if (progress.step === 'error') {
                 setGenerationProgress(`错误: ${progress.message}`);
@@ -2470,12 +3068,18 @@ export function App() {
     setGeneratedPages([]);
     setGeneratedQueries([]);
     setImportSummary([]);
+    setSelectedDatasetId(undefined);
     setActiveImportedComponentId(undefined);
-    setShowInspectorActions(false);
     setCollapsedImportGroups(defaultImportGroupCollapsedState);
     setImportInspectorState(null);
+    setDatasetDialogMode(null);
+    setJsonImportFilePath('');
+    setJsonImportClearOthers(false);
+    setActiveRibbonTab('home');
+    setWorkspaceMode('report');
     setActiveLeftPaneSection('start');
     setActiveRightPaneTab('properties');
+    setShowRightPane(true);
     setChatMessages([]);
     setShowChatPanel(false);
   };
@@ -2533,7 +3137,7 @@ export function App() {
 
     const apiKey = localStorage.getItem('vibeBiAiApiKey');
     if (!apiKey) {
-      setShowSettings(true);
+      handleOpenSettings();
       return;
     }
 
@@ -2635,18 +3239,35 @@ export function App() {
 
   // AI Generate Report
   const handleGenerateReport = async () => {
-    if (!apiUrl || !isConnected || !userPrompt) return;
+    setWorkspaceMode('report');
+    setActiveRibbonTab('ai');
+    setActiveLeftPaneSection('ai');
+    setShowRightPane(true);
+
+    if (!apiUrl) {
+      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
+      return;
+    }
+
+    if (!isConnected) {
+      setGenerationProgress('请先连接模型，再进行 AI 生成。');
+      return;
+    }
+
+    if (!userPrompt.trim()) {
+      setGenerationProgress('请先输入提示词。');
+      return;
+    }
 
     const apiKey = localStorage.getItem('vibeBiAiApiKey');
     if (!apiKey) {
       setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
-      setShowSettings(true);
+      handleOpenSettings();
       return;
     }
 
     setIsGenerating(true);
     setGenerationProgress('开始生成报表...');
-    setActiveLeftPaneSection('ai');
 
     try {
       const response = await fetch(`${apiUrl}/api/ai/generate`, {
@@ -2692,12 +3313,21 @@ export function App() {
               setGenerationProgress(progress.message || progress.step);
 
               if (progress.step === 'complete' && progress.report) {
-                // Parse generated report
+                const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
+                const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
+
+                if (nextPages.length === 0) {
+                  setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
+                  continue;
+                }
+
                 setGeneratedReport(progress.report);
-                // For now use sample pages/queries - in real implementation
-                // the AI would generate these too
-                setGeneratedPages([samplePage]);
-                setGeneratedQueries(sampleQueries);
+                setGeneratedPages(nextPages);
+                setGeneratedQueries(nextQueries);
+                setActiveImportedComponentId(undefined);
+                setGenerationProgress(
+                  progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
+                );
               } else if (progress.step === 'error') {
                 setGenerationProgress(`错误: ${progress.message}`);
               }
@@ -2722,11 +3352,80 @@ export function App() {
   const currentReport = generatedReport;
   const currentPages = generatedPages.length > 0 ? generatedPages : [];
   const currentQueries = generatedQueries.length > 0 ? generatedQueries : [];
+  const availableTables = modelMetadata?.tables || [];
+  const queryBuilderMetadataGroups = React.useMemo(() => {
+    const measuresByTable = new Map<string, Array<{ name: string; tableName?: string }>>();
+    (modelMetadata?.measures || []).forEach((measure) => {
+      const groupKey = measure.tableName || '__ungrouped__';
+      const bucket = measuresByTable.get(groupKey) || [];
+      bucket.push(measure);
+      measuresByTable.set(groupKey, bucket);
+    });
+
+    const groups = availableTables.map((table) => ({
+      key: table.name,
+      label: table.name,
+      columns: table.columns
+        .filter((column) => !column.isHidden)
+        .map((column) => ({
+          id: getQueryBuilderSelectionId('column', table.name, column.name),
+          kind: 'column' as const,
+          tableName: table.name,
+          name: column.name,
+          dataType: column.dataType,
+        })),
+      measures: (measuresByTable.get(table.name) || []).map((measure) => ({
+        id: getQueryBuilderSelectionId('measure', table.name, measure.name),
+        kind: 'measure' as const,
+        tableName: table.name,
+        name: measure.name,
+      })),
+    }));
+
+    const ungroupedMeasures = (measuresByTable.get('__ungrouped__') || []).map((measure) => ({
+      id: getQueryBuilderSelectionId('measure', measure.tableName || 'Measures', measure.name),
+      kind: 'measure' as const,
+      tableName: measure.tableName || 'Measures',
+      name: measure.name,
+    }));
+
+    if (ungroupedMeasures.length > 0) {
+      groups.push({
+        key: '__ungrouped__',
+        label: '未分组度量',
+        columns: [],
+        measures: ungroupedMeasures,
+      });
+    }
+
+    const search = queryBuilderSearch.trim().toLowerCase();
+    if (!search) {
+      return groups;
+    }
+
+    return groups
+      .map((group) => ({
+        ...group,
+        columns: group.columns.filter((column) => (
+          column.name.toLowerCase().includes(search) || group.label.toLowerCase().includes(search)
+        )),
+        measures: group.measures.filter((measure) => (
+          measure.name.toLowerCase().includes(search) || group.label.toLowerCase().includes(search)
+        )),
+      }))
+      .filter((group) => group.columns.length > 0 || group.measures.length > 0);
+  }, [availableTables, modelMetadata?.measures, queryBuilderSearch]);
+  const allQueryBuilderColumns = React.useMemo(
+    () => queryBuilderMetadataGroups.flatMap((group) => group.columns),
+    [queryBuilderMetadataGroups]
+  );
+  const generatedQueryBuilderDax = buildQueryBuilderDax(queryBuilderDraft);
   const importSummaryGroups = React.useMemo(() => {
     const groups: Record<ImportedVisualCategory, ImportSummaryItem[]> = {
       display: [],
       functional: [],
       decorative: [],
+      custom: [],
     };
 
     importSummary.forEach((item) => {
@@ -2759,30 +3458,283 @@ export function App() {
     }
   }, [modelMetadata, activeRightPaneTab]);
 
-  const hasReport = currentReport && currentPages.length > 0;
+  useEffect(() => {
+    if (queryBuilderMetadataGroups.length === 0) {
+      return;
+    }
+
+    setQueryBuilderExpandedTables((previous) => {
+      const next = { ...previous };
+      let changed = false;
+      queryBuilderMetadataGroups.forEach((group, index) => {
+        if (typeof next[group.key] === 'undefined') {
+          next[group.key] = index < 4;
+          changed = true;
+        }
+      });
+      return changed ? next : previous;
+    });
+  }, [queryBuilderMetadataGroups]);
+
+  const visibleDatasetAssets = React.useMemo(() => importSummary.filter((item) => (
+    item.isVisible
+    && item.hasQuery
+    && Boolean(item.executionDax || item.fullQuery)
+    && item.charts.some((chart) => chart.isVisible)
+    && item.fields.some((field) => field.isVisible)
+  )), [importSummary]);
+  const selectedDataset = importSummary.find((item) => item.id === selectedDatasetId) || importSummary[0];
+  const selectedDatasetChart = selectedDataset?.charts.find((chart) => chart.isVisible) || selectedDataset?.charts[0];
+  const selectedDatasetPreviewResult = selectedDataset
+    ? filterQueryResultByVisibleFields(selectedDataset.previewResult, selectedDataset)
+    : undefined;
+  const selectedDatasetPreviewQueryId = selectedDataset
+    ? selectedDataset.queryId || `preview-${selectedDataset.id}`
+    : undefined;
+
+  useEffect(() => {
+    if (selectedDatasetPreviewQueryId && selectedDatasetPreviewResult) {
+      primeQueryCache(selectedDatasetPreviewQueryId, selectedDatasetPreviewResult.rows);
+    }
+  }, [selectedDatasetPreviewQueryId, selectedDatasetPreviewResult]);
+
+  const hasReport = Boolean(currentReport && currentPages.length > 0);
   const hasImportedVisuals = importSummary.length > 0;
-  const openImportDialog = () => {
-    importFileInputRef.current?.click();
-  };
-  const importableVisualCount = importSummaryGroups.display.filter((item) => item.hasQuery && item.fullQuery).length;
+  const importableVisualCount = visibleDatasetAssets.length;
   const ribbonTabs: Array<{ id: RibbonTabId; label: string; color: string }> = [
     { id: 'home', label: '主页', color: '#22C983' },
-    { id: 'data', label: '数据', color: '#3B82F6' },
+    { id: 'dataset', label: '数据集', color: '#3B82F6' },
     { id: 'ai', label: 'AI', color: '#8B5CF6' },
     { id: 'view', label: '视图', color: '#F59E0B' },
   ];
-  const leftPaneItems: Array<{ id: LeftPaneSectionId; label: string; icon: React.ReactNode; color: string }> = [
-    { id: 'start', label: '开始', color: '#22C983', icon: createMonoIcon('⌂', 16) },
-    { id: 'import', label: '导入', color: '#3B82F6', icon: createMonoIcon('↓', 17) },
-    { id: 'ai', label: 'AI', color: '#8B5CF6', icon: createMonoIcon('◇', 16) },
-    { id: 'model', label: '模型', color: '#F59E0B', icon: createMonoIcon('▦', 14) },
+  const workspaceRailItems: Array<{ id: WorkspaceRailId; label: string; icon: React.ReactNode }> = [
+    { id: 'report', label: '报表视图', icon: createMonoIcon('report-view', 16) },
+    { id: 'data', label: '数据视图', icon: createMonoIcon('data-view', 14) },
+  ];
+  const inspectorSections: Array<{ id: LeftPaneSectionId; label: string; color: string }> = [
+    { id: 'start', label: '主页', color: '#22C983' },
+    { id: 'import', label: '导入', color: '#3B82F6' },
+    { id: 'ai', label: 'AI', color: '#8B5CF6' },
+    { id: 'model', label: '模型', color: '#F59E0B' },
   ];
   const rightPaneTabs: Array<{ id: RightPaneTabId; label: string; color: string }> = [
     { id: 'visuals', label: '视觉对象', color: '#22C983' },
     { id: 'fields', label: '字段', color: '#3B82F6' },
     { id: 'properties', label: '属性', color: '#F59E0B' },
   ];
-  const activeLeftPaneMeta = leftPaneItems.find((item) => item.id === activeLeftPaneSection) || leftPaneItems[0];
+  const activeInspectorMeta = inspectorSections.find((item) => item.id === activeLeftPaneSection) || inspectorSections[0];
+  const showReportRightPane = workspaceMode === 'report' && showRightPane;
+  const datasetPreviewPane = (() => {
+    if (!selectedDataset) {
+      return (
+        <div style={{ color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.7 }}>
+          先创建或导入一个数据集，这里会显示图表素材预览。
+        </div>
+      );
+    }
+
+    if (!selectedDataset.isVisible) {
+      return (
+        <div style={{ color: shellPalette.warning, fontSize: 12, lineHeight: 1.7 }}>
+          当前数据集已隐藏，不会参与 AI 报表生成。重新设为可见后才会恢复预览联动。
+        </div>
+      );
+    }
+
+    if (!selectedDatasetPreviewResult || selectedDataset.fields.every((field) => !field.isVisible)) {
+      return (
+        <div style={{ color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.7 }}>
+          当前没有可见字段可用于预览。请在右侧打开至少一个字段。
+        </div>
+      );
+    }
+
+    if (!selectedDatasetChart || !selectedDatasetChart.isVisible || selectedDatasetChart.componentType === 'filter') {
+      const previewColumns = selectedDatasetPreviewResult.columns.filter((column) => column.name !== '__rowIndex');
+      const previewRows = selectedDatasetPreviewResult.rows.slice(0, 8);
+
+      return (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
+              当前没有可视图表，以下展示可见字段的数据预览。
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setImportInspectorState({ item: selectedDataset, mode: 'dax' })}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: '#FFFFFF',
+                  color: shellPalette.text,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                查看 DAX
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportInspectorState({ item: selectedDataset, mode: 'data' })}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.accentBorder}`,
+                  background: shellPalette.accentSoft,
+                  color: shellPalette.accent,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                数据预览
+              </button>
+            </div>
+          </div>
+          <div style={{ overflow: 'auto', border: `1px solid ${shellPalette.border}`, borderRadius: 12, background: '#FFFFFF' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: shellPalette.ribbonMutedBg }}>
+                  {previewColumns.map((column) => (
+                    <th key={column.name} style={{ padding: '10px 12px', textAlign: 'left', color: shellPalette.text, borderBottom: `1px solid ${shellPalette.border}` }}>
+                      {column.name}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {previewRows.map((row, rowIndex) => (
+                  <tr key={String(row.__rowIndex ?? rowIndex)}>
+                    {previewColumns.map((column) => (
+                      <td key={`${rowIndex}-${column.name}`} style={{ padding: '10px 12px', color: shellPalette.textMuted, borderBottom: `1px solid ${shellPalette.border}` }}>
+                        {typeof row[column.name] === 'object' ? JSON.stringify(row[column.name]) : String(row[column.name] ?? '')}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    const previewChartType: ChartType = selectedDatasetChart.chartType === 'pie'
+      ? 'pie'
+      : selectedDatasetChart.chartType === 'line'
+        ? 'line'
+        : selectedDatasetChart.chartType === 'area'
+          ? 'area'
+          : selectedDatasetChart.chartType === 'scatter'
+            ? 'scatter'
+            : 'bar';
+    const previewReport: ReportDefinition = {
+      formatVersion: '1.0.0',
+      id: `preview-report-${selectedDataset.id}`,
+      name: `${selectedDataset.name} 预览`,
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+      generationMode: 'manual',
+      pages: [`preview-page-${selectedDataset.id}`],
+      defaultPage: `preview-page-${selectedDataset.id}`,
+    };
+    const previewPage: PageDefinition = {
+      id: `preview-page-${selectedDataset.id}`,
+      name: '预览',
+      layout: {
+        type: 'grid',
+        columns: 12,
+        rowHeight: 48,
+        gap: 12,
+        padding: 16,
+      },
+      filters: [],
+      components: [{
+        id: `preview-component-${selectedDataset.id}`,
+        type: selectedDatasetChart.componentType,
+        position: { x: 0, y: 0, w: 12, h: selectedDatasetChart.componentType === 'kpi-card' ? 3 : 7 },
+        queryRef: selectedDatasetPreviewQueryId!,
+        config: buildComponentConfig(selectedDatasetChart.componentType, previewChartType, selectedDataset.name, selectedDatasetPreviewResult),
+      }],
+    };
+    const previewQuery: QueryDefinition = {
+      id: selectedDatasetPreviewQueryId!,
+      name: selectedDataset.name,
+      dax: selectedDataset.executionDax || selectedDataset.fullQuery || 'EVALUATE ROW("Value", BLANK())',
+      executionDax: selectedDataset.executionDax || selectedDataset.fullQuery || 'EVALUATE ROW("Value", BLANK())',
+      evaluateQueries: selectedDataset.evaluateQueries,
+      selectedEvaluateIndex: selectedDataset.selectedEvaluateIndex,
+      parameters: [],
+    };
+
+    return (
+      <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <InfoPill label="图表类型" value={selectedDatasetChart.chartType} tone="accent" />
+            <InfoPill label="可见字段" value={String(selectedDataset.fields.filter((field) => field.isVisible).length)} />
+            <InfoPill label="预览行数" value={String(selectedDatasetPreviewResult.rowCount)} tone="success" />
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => setImportInspectorState({ item: selectedDataset, mode: 'dax' })}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 10,
+                border: `1px solid ${shellPalette.border}`,
+                background: '#FFFFFF',
+                color: shellPalette.text,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              查看 DAX
+            </button>
+            <button
+              type="button"
+              onClick={() => setImportInspectorState({ item: selectedDataset, mode: 'data' })}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 10,
+                border: `1px solid ${shellPalette.accentBorder}`,
+                background: shellPalette.accentSoft,
+                color: shellPalette.accent,
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              数据预览
+            </button>
+          </div>
+        </div>
+        <div
+          style={{
+            minHeight: 340,
+            borderRadius: 14,
+            border: `1px solid ${shellPalette.border}`,
+            background: shellPalette.canvasBg,
+            overflow: 'hidden',
+            boxShadow: shellPalette.shadow,
+          }}
+        >
+          <ReportRenderer
+            report={previewReport}
+            pages={[previewPage]}
+            queries={[previewQuery]}
+            theme={sampleTheme}
+            dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
+            apiBaseUrl={apiUrl}
+          />
+        </div>
+      </div>
+    );
+  })();
   const collapseChromeButtonStyle: React.CSSProperties = {
     width: 20,
     height: 20,
@@ -3001,7 +3953,7 @@ export function App() {
               aria-label="收起设置"
               style={collapseChromeButtonStyle}
             >
-              «
+              <ShellIcon name="chevron-left" size={14} />
             </button>
           )}
         >
@@ -3082,7 +4034,7 @@ export function App() {
               aria-label="收起设置"
               style={collapseChromeButtonStyle}
             >
-              «
+              <ShellIcon name="chevron-left" size={14} />
             </button>
           )}
         >
@@ -3109,7 +4061,7 @@ export function App() {
                   lineHeight: 1.6,
                   padding: 12,
                   boxSizing: 'border-box',
-                  fontFamily: '"Segoe UI", "Segoe UI Variable", system-ui, sans-serif',
+                  fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
                 }}
               />
               <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
@@ -3258,7 +4210,7 @@ export function App() {
               aria-label="收起设置"
               style={collapseChromeButtonStyle}
             >
-              «
+              <ShellIcon name="chevron-left" size={14} />
             </button>
           )}
         >
@@ -3319,7 +4271,7 @@ export function App() {
                 {activeTab === 'measures'
                   ? modelMetadata?.measures.map((measure, idx) => (
                     <div
-                      key={`${measure.table}-${measure.name}-${idx}`}
+                      key={`${measure.tableName || 'unknown'}-${measure.name}-${idx}`}
                       style={{
                         padding: 10,
                         borderRadius: 8,
@@ -3329,7 +4281,7 @@ export function App() {
                     >
                       <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{measure.name}</div>
                       <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {measure.table}
+                        {measure.tableName || '未分组'}
                       </div>
                     </div>
                   ))
@@ -3374,7 +4326,7 @@ export function App() {
             aria-label="收起设置"
             style={collapseChromeButtonStyle}
           >
-            «
+            <ShellIcon name="chevron-left" size={14} />
           </button>
         )}
       >
@@ -3495,7 +4447,7 @@ export function App() {
                 {activeTab === 'measures'
                   ? modelMetadata?.measures.map((measure, idx) => (
                     <div
-                      key={`${measure.table}-${measure.name}-${idx}`}
+                      key={`${measure.tableName || 'unknown'}-${measure.name}-${idx}`}
                       style={{
                         padding: 10,
                         borderRadius: 8,
@@ -3505,7 +4457,7 @@ export function App() {
                     >
                       <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{measure.name}</div>
                       <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {measure.table}
+                        {measure.tableName || '未分组'}
                       </div>
                     </div>
                   ))
@@ -3545,7 +4497,6 @@ export function App() {
             <div style={{ display: 'grid', gap: 10 }}>
               <InfoPill label="左侧导航" value={showLeftPane ? '显示中' : '已隐藏'} tone={showLeftPane ? 'accent' : 'default'} />
               <InfoPill label="右侧设置" value={showRightPane ? '显示中' : '已折叠'} tone={showRightPane ? 'accent' : 'default'} />
-              <InfoPill label="DAX / 数据按钮" value={showInspectorActions ? '显示中' : '已隐藏'} tone={showInspectorActions ? 'success' : 'default'} />
             </div>
             <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
               这里显示当前状态。
@@ -3566,7 +4517,7 @@ export function App() {
           </PaneCard>
           <PaneCard title="应用设置" subtitle="当前工作区上下文。">
             <div style={{ display: 'grid', gap: 10 }}>
-              <InfoPill label="当前左侧上下文" value={activeLeftPaneMeta.label} tone="accent" />
+              <InfoPill label="当前上下文" value={activeInspectorMeta.label} tone="accent" />
               <InfoPill label="当前右侧页签" value={rightPaneTabs.find((tab) => tab.id === activeRightPaneTab)?.label || activeRightPaneTab} />
             </div>
             <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
@@ -3611,13 +4562,12 @@ export function App() {
           aria-hidden="true"
           style={{
             marginTop: 14,
-            color: activeLeftPaneMeta.color,
-            fontSize: 15,
-            fontWeight: 800,
+            color: activeInspectorMeta.color,
             lineHeight: 1,
+            display: 'inline-flex',
           }}
         >
-          «
+          <ShellIcon name="chevron-left" size={15} />
         </span>
         <span
           aria-hidden="true"
@@ -3630,53 +4580,39 @@ export function App() {
             letterSpacing: 1.6,
           }}
         >
-          {activeLeftPaneMeta.label}
+          {activeInspectorMeta.label}
         </span>
       </button>
     </div>
   );
   const renderRibbonContent = () => {
-    if (activeRibbonTab === 'data') {
+    if (activeRibbonTab === 'dataset') {
       return (
         <>
-          <RibbonGroup title="导入">
+          <RibbonGroup title="创建">
             <CommandButton
-              icon={createGradientIcon('↓', '#60A5FA', '#2563EB')}
+              icon={createGradientIcon('import', '#60A5FA', '#2563EB')}
               label="导入 JSON"
-              description="导入 Performance Analyzer 文件"
-              onClick={openImportDialog}
+              description="导入 Performance Analyzer 导出的 JSON"
+              onClick={() => openDatasetDialog('import-json')}
               disabled={!isConnected || isImporting}
               tone="accent"
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('▥', '#34D399', '#0F8C72')}
-              label="视觉对象"
-              description="切换到导入设置并查看 visual 列表"
-              onClick={() => {
-                setActiveLeftPaneSection('import');
-                setShowRightPane(true);
-              }}
-              showDescription={false}
-            />
-          </RibbonGroup>
-          <RibbonGroup title="模型">
-            <CommandButton
-              icon={createGradientIcon('☰', '#FBBF24', '#F97316')}
-              label="字段 pane"
-              description="切换到模型设置并查看表与度量"
-              onClick={() => {
-                setActiveLeftPaneSection('model');
-                setShowRightPane(true);
-              }}
+              icon={createGradientIcon('custom-dax', '#34D399', '#0F8C72')}
+              label="自定义"
+              description="手动编写 DAX 创建数据集"
+              onClick={() => openDatasetDialog('custom-dax')}
+              disabled={!isConnected || isImporting}
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('↺', '#4ADE80', '#0F8C72')}
-              label="重新连接"
-              description="刷新模型元数据"
-              onClick={handleOpenConnectDialog}
-              disabled={isConnecting || !apiUrl}
+              icon={createGradientIcon('query-builder', '#FBBF24', '#F97316')}
+              label="查询生成器"
+              description="拖拽维度和度量生成 DAX 查询"
+              onClick={() => openDatasetDialog('query-builder')}
+              disabled={!isConnected || isImporting}
               showDescription={false}
             />
           </RibbonGroup>
@@ -3689,44 +4625,52 @@ export function App() {
         <>
           <RibbonGroup title="生成">
             <CommandButton
-              icon={createGradientIcon('✧', '#A78BFA', '#7C3AED')}
-              label={isGenerating ? '生成中...' : '生成报表'}
-              description="根据模型元数据生成"
-              onClick={handleGenerateReport}
+              icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
+              label={isGenerating ? '生成中...' : '从模型生成'}
+              description="根据当前模型和提示词生成报表"
+              onClick={() => {
+                setWorkspaceMode('report');
+                setActiveLeftPaneSection('ai');
+                setShowRightPane(true);
+                void handleGenerateReport();
+              }}
               disabled={isGenerating}
               tone="accent"
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('◈', '#7DD3FC', '#3B82F6')}
-              label="从导入生成"
-              description="根据导入的展示型 visual 生成"
-              onClick={handleAiGenerateFromImport}
+              icon={createGradientIcon('visual-library', '#7DD3FC', '#3B82F6')}
+              label="从素材生成"
+              description="仅使用可见素材库自动排版生成"
+              onClick={() => { void handleAiGenerateFromImport(); }}
               disabled={isGenerating || importableVisualCount === 0}
               showDescription={false}
             />
           </RibbonGroup>
-          <RibbonGroup title="对话">
+          <RibbonGroup title="编辑">
             <CommandButton
-              icon={createGradientIcon('⋯', '#818CF8', '#4F46E5')}
-              label={showChatPanel ? '收起对话' : '打开对话'}
-              description="对当前报表继续微调"
+              icon={createGradientIcon('refresh', '#818CF8', '#4F46E5')}
+              label="同步提示词"
+              description="根据当前报表反向生成修改提示词"
               onClick={() => {
                 setActiveLeftPaneSection('ai');
-                handleToggleChatPanel();
+                setWorkspaceMode('report');
+                setUserPrompt(generateReversePrompt());
+                setShowRightPane(true);
               }}
-              active={showChatPanel}
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('⚙', '#FDBA74', '#F97316')}
-              label="AI 设置"
-              description="配置 Provider、Key、Base URL"
+              icon={createGradientIcon('message', '#FDBA74', '#F97316')}
+              label={showChatPanel ? '收起对话' : '打开对话'}
+              description="对当前报表继续微调"
               onClick={() => {
-                setShowSettings(true);
-                setAiTestStatus('idle');
-                setAiTestMessage('');
+                setWorkspaceMode('report');
+                setActiveLeftPaneSection('ai');
+                setShowRightPane(true);
+                handleToggleChatPanel();
               }}
+              active={showChatPanel}
               showDescription={false}
             />
           </RibbonGroup>
@@ -3739,27 +4683,19 @@ export function App() {
         <>
           <RibbonGroup title="面板">
             <CommandButton
-              icon={createGradientIcon('«', '#34D399', '#0F8C72')}
-              label={showRightPane ? '收起设置' : '展开设置'}
+              icon={createGradientIcon('chevron-left', '#34D399', '#0F8C72')}
+              label={showReportRightPane ? '收起设置' : '展开设置'}
               description="折叠或展开右侧设置面板"
               onClick={() => setShowRightPane((prev) => !prev)}
-              active={showRightPane}
-              showDescription={false}
-            />
-            <CommandButton
-              icon={createGradientIcon('⊞', '#7DD3FC', '#2563EB')}
-              label={showInspectorActions ? '隐藏按钮' : '显示按钮'}
-              description="控制图表右上角 DAX / 数据按钮"
-              onClick={() => setShowInspectorActions((prev) => !prev)}
-              active={showInspectorActions}
+              active={showReportRightPane}
               showDescription={false}
             />
           </RibbonGroup>
-          <RibbonGroup title="检查">
+          <RibbonGroup title="定位">
             <CommandButton
-              icon={createGradientIcon('⌂', '#39D98A', '#0F8C72')}
-              label="开始"
-              description="切换到开始设置"
+              icon={createGradientIcon('home', '#39D98A', '#0F8C72')}
+              label="主页面板"
+              description="查看连接、导入和系统状态"
               onClick={() => {
                 setActiveLeftPaneSection('start');
                 setShowRightPane(true);
@@ -3768,14 +4704,25 @@ export function App() {
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('✦', '#A78BFA', '#7C3AED')}
-              label="AI"
-              description="定位到 AI 设置"
+              icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
+              label="AI 面板"
+              description="定位到报表生成与微调设置"
               onClick={() => {
                 setActiveLeftPaneSection('ai');
                 setShowRightPane(true);
               }}
               active={activeLeftPaneSection === 'ai'}
+              showDescription={false}
+            />
+            <CommandButton
+              icon={createGradientIcon('model', '#FBBF24', '#F97316')}
+              label="模型面板"
+              description="查看模型表、字段和度量"
+              onClick={() => {
+                setActiveLeftPaneSection('model');
+                setShowRightPane(true);
+              }}
+              active={activeLeftPaneSection === 'model'}
               showDescription={false}
             />
           </RibbonGroup>
@@ -3787,16 +4734,16 @@ export function App() {
       <>
         <RibbonGroup title="连接">
           <CommandButton
-            icon={createGradientIcon('⊕', '#39D98A', '#0F8C72')}
-            label={isConnected ? '已连接' : isConnecting ? '连接中...' : '连接数据源'}
-            description={isConnected ? 'Power BI Desktop 已就绪' : '连接本地 Power BI Desktop'}
+            icon={createGradientIcon('connect', '#39D98A', '#0F8C72')}
+            label={isConnected ? '已连接' : isConnecting ? '连接中...' : '连接模型'}
+            description={isConnected ? '当前模型连接已就绪' : '连接 Power BI Desktop 或 Tabular Server'}
             onClick={handleOpenConnectDialog}
             disabled={!apiUrl}
             tone="accent"
             showDescription={false}
           />
           <CommandButton
-            icon={createGradientIcon('×', '#FB7185', '#E11D48')}
+            icon={createGradientIcon('disconnect', '#FB7185', '#E11D48')}
             label="断开连接"
             description="清空模型和报表状态"
             onClick={handleDisconnect}
@@ -3804,51 +4751,40 @@ export function App() {
             showDescription={false}
           />
         </RibbonGroup>
-        <RibbonGroup title="开始">
-          <CommandButton
-            icon={createGradientIcon('↓', '#60A5FA', '#2563EB')}
-            label="导入 JSON"
-            description="导入 Performance Analyzer 导出文件"
-            onClick={openImportDialog}
-            disabled={!isConnected || isImporting}
-            tone="accent"
-            showDescription={false}
-          />
-            <CommandButton
-              icon={createGradientIcon('✦', '#A78BFA', '#7C3AED')}
-              label="AI 工作区"
-              description="切换到 AI 生成与对话区域"
-              onClick={() => {
-                setActiveLeftPaneSection('ai');
-                setActiveRibbonTab('ai');
-                setShowRightPane(true);
-              }}
-              showDescription={false}
-            />
-        </RibbonGroup>
         <RibbonGroup title="系统">
           <CommandButton
-            icon={createGradientIcon('⚙', '#FDBA74', '#F97316')}
+            icon={createGradientIcon('settings', '#FDBA74', '#F97316')}
             label="设置"
-            description="配置 AI Provider、Key 与 Base URL"
+            description="配置 AI Provider、Key 和代理地址"
+            onClick={handleOpenSettings}
+            showDescription={false}
+          />
+          <CommandButton
+            icon={createGradientIcon('refresh', '#60A5FA', '#2563EB')}
+            label="刷新连接"
+            description="重新打开连接窗口并刷新模型元数据"
+            onClick={handleOpenConnectDialog}
+            disabled={!apiUrl}
+            showDescription={false}
+          />
+        </RibbonGroup>
+        <RibbonGroup title="发布">
+          <CommandButton
+            icon={createGradientIcon('publish', '#7DD3FC', '#2563EB')}
+            label="发布"
+            description="预留报表发布与共享入口"
+            onClick={() => setGenerationProgress('发布能力预留在主页 Ribbon，后续可接入导出与发布流程。')}
+            showDescription={false}
+          />
+          <CommandButton
+            icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
+            label="进入 AI"
+            description="切换到 AI 报表生成与微调工作区"
             onClick={() => {
-              setShowSettings(true);
-              setAiTestStatus('idle');
-              setAiTestMessage('');
+              handleRibbonTabChange('ai');
             }}
             showDescription={false}
           />
-            <CommandButton
-              icon={createGradientIcon('▦', '#FBBF24', '#F97316')}
-              label="模型"
-              description="切换到模型概览和字段浏览器"
-              onClick={() => {
-                setActiveLeftPaneSection('model');
-                setActiveRibbonTab('data');
-                setShowRightPane(true);
-              }}
-              showDescription={false}
-            />
         </RibbonGroup>
       </>
     );
@@ -3859,7 +4795,9 @@ export function App() {
       <div style={{ width: '100vw', height: '100vh', background: shellPalette.appBg, color: shellPalette.error, padding: 24 }}>
         <h1>错误</h1>
         <p>{error}</p>
-        <pre style={{ color: shellPalette.textMuted }}>{JSON.stringify(window.electronAPI, null, 2)}</pre>
+        <p style={{ color: shellPalette.textMuted }}>
+          请检查桌面端主进程、preload 与 .NET 后端是否已正常启动。
+        </p>
       </div>
     );
   }
@@ -3875,17 +4813,9 @@ export function App() {
         overflow: 'hidden',
       }}
     >
-      <input
-        ref={importFileInputRef}
-        type="file"
-        accept=".json"
-        onChange={handleImportPerformanceAnalyzer}
-        disabled={!isConnected || isImporting}
-        style={{ display: 'none' }}
-      />
       <div style={{ display: 'flex', alignItems: 'stretch', background: shellPalette.ribbonBg }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <RibbonTabs items={ribbonTabs} activeId={activeRibbonTab} onChange={setActiveRibbonTab} />
+          <RibbonTabs items={ribbonTabs} activeId={activeRibbonTab} onChange={handleRibbonTabChange} />
         </div>
         <button
           type="button"
@@ -3905,7 +4835,7 @@ export function App() {
             justifyContent: 'center',
           }}
         >
-          {isRibbonCollapsed ? '▾' : '▴'}
+          <ShellIcon name={isRibbonCollapsed ? 'chevron-down' : 'chevron-up'} size={12} />
         </button>
       </div>
       {!isRibbonCollapsed ? (
@@ -3915,100 +4845,1011 @@ export function App() {
       ) : null}
       <WorkspaceLayout
         leftWidth="56px"
-        rightWidth={showRightPane ? '380px' : '28px'}
+        rightWidth={showReportRightPane ? '380px' : '28px'}
         leftPane={showLeftPane ? (
           <div style={{ minWidth: 0, minHeight: 0, display: 'flex', background: shellPalette.paneBg }}>
             <SideRail
-              items={leftPaneItems}
-              activeId={activeLeftPaneSection}
-              onChange={(id) => {
-                setActiveLeftPaneSection(id);
-                setShowRightPane(true);
-              }}
+              items={workspaceRailItems}
+              activeId={workspaceMode}
+              onChange={handleWorkspaceModeChange}
             />
           </div>
         ) : undefined}
         center={(
-          <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: shellPalette.workspaceBg }}>
-            <WorkspaceHeader
-              title={hasReport ? (currentReport?.name || '报表画布') : '报表画布'}
-              subtitle={hasReport
-                ? `页面 ${currentPages.length} · 查询 ${currentQueries.length}${importSummary.length > 0 ? ` · 导入视觉对象 ${importSummary.length}` : ''}`
-                : '连接模型、导入 JSON，或直接从 AI 工作区开始生成报表。'}
-              actions={(
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                  <InfoPill label="查询" value={String(currentQueries.length)} />
-                  <InfoPill label="Visual" value={String(importSummary.length)} tone={importSummary.length > 0 ? 'accent' : 'default'} />
-                  <button
-                    type="button"
-                    onClick={() => setShowInspectorActions((prev) => !prev)}
+          workspaceMode === 'data' ? (
+            <div style={{ minWidth: 0, minHeight: 0, display: 'flex', background: shellPalette.workspaceBg }}>
+              <DataWorkbench
+                modelMetadata={modelMetadata}
+                datasets={importSummary}
+                selectedDatasetId={selectedDataset?.id}
+                previewPane={datasetPreviewPane}
+                isBusy={isImporting}
+                onSelectDataset={handleSelectDataset}
+                onRenameDataset={handleRenameDataset}
+                onDuplicateDataset={handleDuplicateDataset}
+                onDeleteDataset={handleDeleteDataset}
+                onRefreshDataset={handleRefreshDataset}
+                onToggleDatasetVisibility={handleToggleDatasetVisibility}
+                onToggleChartVisibility={handleToggleChartVisibility}
+                onChangeChartType={handleChangeChartType}
+                onToggleFieldVisibility={handleToggleFieldVisibility}
+              />
+            </div>
+          ) : (
+            <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: shellPalette.workspaceBg }}>
+              <WorkspaceHeader
+                title={hasReport ? (currentReport?.name || '报表画布') : '报表画布'}
+                subtitle={hasReport
+                  ? `页面 ${currentPages.length} · 查询 ${currentQueries.length}${importSummary.length > 0 ? ` · 数据集 ${importSummary.length}` : ''}`
+                  : '连接模型、进入数据视图准备素材，或直接从 AI 工作区开始生成报表。'}
+                actions={(
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    <InfoPill label="查询" value={String(currentQueries.length)} />
+                    <InfoPill label="数据集" value={String(importSummary.length)} tone={importSummary.length > 0 ? 'accent' : 'default'} />
+                  </div>
+                )}
+              />
+              {!apiUrl ? (
+                <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: shellPalette.textMuted }}>
+                  正在连接后端服务...
+                </div>
+              ) : !hasReport ? (
+                <WorkspaceWelcome
+                  onConnect={handleOpenConnectDialog}
+                  onImport={() => openDatasetDialog('import-json')}
+                  onGenerate={() => {
+                    handleRibbonTabChange('ai');
+                  }}
+                  onOpenAi={() => {
+                    handleRibbonTabChange('ai');
+                    setShowChatPanel(true);
+                  }}
+                  isConnected={isConnected}
+                  hasImportedVisuals={hasImportedVisuals}
+                  canGenerate={isConnected && importableVisualCount > 0}
+                  canOpenAi={hasReport}
+                />
+              ) : (
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 20 }}>
+                  <div
                     style={{
-                      padding: '6px 10px',
-                      borderRadius: 999,
+                      minHeight: '100%',
+                      borderRadius: 14,
                       border: `1px solid ${shellPalette.border}`,
-                      background: showInspectorActions ? shellPalette.accentSoft : shellPalette.ribbonMutedBg,
-                      color: showInspectorActions ? shellPalette.accent : shellPalette.textMuted,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: 'pointer',
+                      background: shellPalette.canvasBg,
+                      boxShadow: shellPalette.shadow,
+                      overflow: 'hidden',
                     }}
                   >
-                    {showInspectorActions ? '已显示 DAX 按钮' : '隐藏 DAX 按钮'}
-                  </button>
+                    <ReportRenderer
+                      report={currentReport!}
+                      pages={currentPages}
+                      queries={currentQueries}
+                      theme={sampleTheme}
+                      dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
+                      apiBaseUrl={apiUrl}
+                      activeComponentId={activeImportedComponentId}
+                    />
+                  </div>
                 </div>
               )}
-            />
-            {!apiUrl ? (
-              <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: shellPalette.textMuted }}>
-                正在连接后端服务...
+            </div>
+          )
+        )}
+        rightPane={workspaceMode === 'report' ? (showReportRightPane ? renderLeftPaneContent() : renderCollapsedRightPane()) : undefined}
+      />
+
+      {datasetDialogMode === 'import-json' && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(32, 31, 30, 0.24)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: 560,
+              maxWidth: '92%',
+              borderRadius: 18,
+              border: `1px solid ${shellPalette.border}`,
+              background: 'linear-gradient(180deg, #FFFEFB 0%, #F8FAFE 100%)',
+              boxShadow: '0 24px 64px rgba(15, 23, 42, 0.18)',
+              overflow: 'hidden',
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '18px 20px 14px',
+                borderBottom: `1px solid ${shellPalette.border}`,
+                background: 'linear-gradient(180deg, #FFFFFF 0%, #F7FAFE 100%)',
+              }}
+            >
+              {createGradientIcon('import', '#60A5FA', '#2563EB', 26)}
+              <div>
+                <div style={{ color: shellPalette.text, fontSize: 18, fontWeight: 700 }}>
+                  导入 JSON
+                </div>
+                <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 12 }}>
+                  选择 Power BI Performance Analyzer 导出的 JSON 文件。
+                </div>
               </div>
-            ) : !hasReport ? (
-              <WorkspaceWelcome
-                onConnect={handleOpenConnectDialog}
-                onImport={openImportDialog}
-                onGenerate={() => {
-                  setActiveLeftPaneSection('ai');
-                  setActiveRibbonTab('ai');
+            </div>
+
+            <div style={{ padding: 18, display: 'grid', gap: 14 }}>
+              <div>
+                <div style={{ color: shellPalette.textMuted, fontSize: 12, marginBottom: 6 }}>
+                  文件路径
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8 }}>
+                  <input
+                    type="text"
+                    value={jsonImportFilePath}
+                    onChange={(event) => setJsonImportFilePath(event.target.value)}
+                    placeholder="选择要导入的 JSON 文件"
+                    style={{
+                      width: '100%',
+                      padding: '11px 12px',
+                      borderRadius: 10,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: '#FFFFFF',
+                      color: shellPalette.text,
+                      fontSize: 13,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { void handleChooseJsonImportFile(); }}
+                    style={{
+                      padding: '11px 14px',
+                      borderRadius: 10,
+                      border: `1px solid ${shellPalette.accentBorder}`,
+                      background: '#FFFFFF',
+                      color: shellPalette.accent,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    选择文件
+                  </button>
+                </div>
+              </div>
+
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '12px 14px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: shellPalette.ribbonMutedBg,
+                  color: shellPalette.text,
+                  fontSize: 13,
+                  cursor: 'pointer',
                 }}
-                onOpenAi={() => {
-                  setActiveLeftPaneSection('ai');
-                  setActiveRibbonTab('ai');
-                  setShowChatPanel(true);
+              >
+                <input
+                  type="checkbox"
+                  checked={jsonImportClearOthers}
+                  onChange={(event) => setJsonImportClearOthers(event.target.checked)}
+                />
+                清空其它图表
+              </label>
+
+              {importError ? (
+                <div style={{ color: shellPalette.error, fontSize: 12 }}>
+                  {importError}
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 10,
+                padding: '0 18px 18px',
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeDatasetDialog}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: '#FFFFFF',
+                  color: shellPalette.textMuted,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
                 }}
-                isConnected={isConnected}
-                hasImportedVisuals={hasImportedVisuals}
-                canGenerate={isConnected && hasImportedVisuals}
-                canOpenAi={hasReport}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => { void handleImportJsonFromDialog(); }}
+                disabled={!isConnected || isImporting || !jsonImportFilePath.trim()}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #2563EB 0%, #60A5FA 100%)',
+                  color: '#FFFFFF',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: !isConnected || isImporting || !jsonImportFilePath.trim() ? 'not-allowed' : 'pointer',
+                  opacity: !isConnected || isImporting || !jsonImportFilePath.trim() ? 0.68 : 1,
+                }}
+              >
+                {isImporting ? '导入中...' : '开始导入'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {datasetDialogMode === 'custom-dax' && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(32, 31, 30, 0.24)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: 760,
+              maxWidth: '94%',
+              borderRadius: 18,
+              border: `1px solid ${shellPalette.border}`,
+              background: 'linear-gradient(180deg, #FFFEFB 0%, #F8FAFE 100%)',
+              boxShadow: '0 24px 64px rgba(15, 23, 42, 0.18)',
+              overflow: 'hidden',
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '18px 20px 14px',
+                borderBottom: `1px solid ${shellPalette.border}`,
+                background: 'linear-gradient(180deg, #FFFFFF 0%, #F7FAFE 100%)',
+              }}
+            >
+              {createGradientIcon('custom-dax', '#34D399', '#0F8C72', 26)}
+              <div>
+                <div style={{ color: shellPalette.text, fontSize: 18, fontWeight: 700 }}>
+                  自定义数据集
+                </div>
+                <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 12 }}>
+                  手动编写 DAX 查询并生成数据集素材。
+                </div>
+              </div>
+            </div>
+
+            <div style={{ padding: 18, display: 'grid', gap: 14 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 200px', gap: 12 }}>
+                <input
+                  type="text"
+                  value={customDatasetDraft.name}
+                  onChange={(event) => setCustomDatasetDraft((previous) => ({ ...previous, name: event.target.value }))}
+                  placeholder="数据集名称"
+                  style={{
+                    width: '100%',
+                    padding: '11px 12px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.text,
+                    fontSize: 13,
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <select
+                  value={customDatasetDraft.chartType}
+                  onChange={(event) => setCustomDatasetDraft((previous) => ({ ...previous, chartType: event.target.value as DatasetVisualType }))}
+                  style={{
+                    width: '100%',
+                    padding: '11px 12px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.text,
+                    fontSize: 13,
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {[
+                    { value: 'bar', label: '柱状图' },
+                    { value: 'line', label: '折线图' },
+                    { value: 'pie', label: '饼图' },
+                    { value: 'area', label: '面积图' },
+                    { value: 'scatter', label: '散点图' },
+                    { value: 'kpi-card', label: 'KPI 卡片' },
+                    { value: 'data-table', label: '数据表' },
+                  ].map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <textarea
+                rows={15}
+                value={customDatasetDraft.dax}
+                onChange={(event) => setCustomDatasetDraft((previous) => ({ ...previous, dax: event.target.value }))}
+                style={{
+                  width: '100%',
+                  resize: 'vertical',
+                  minHeight: 300,
+                  padding: 14,
+                  borderRadius: 12,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: '#FAFCFF',
+                  color: shellPalette.text,
+                  fontSize: 12,
+                  lineHeight: 1.65,
+                  boxSizing: 'border-box',
+                  fontFamily: 'Consolas, "Courier New", monospace',
+                }}
               />
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 20 }}>
+
+              {importError ? (
+                <div style={{ color: shellPalette.error, fontSize: 12 }}>
+                  {importError}
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 10,
+                padding: '0 18px 18px',
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeDatasetDialog}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: '#FFFFFF',
+                  color: shellPalette.textMuted,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => { void handleCreateCustomDatasetFromDialog(); }}
+                disabled={!isConnected || isImporting || !customDatasetDraft.dax.trim()}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #0F8C72 0%, #22C983 100%)',
+                  color: '#FFFFFF',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: !isConnected || isImporting || !customDatasetDraft.dax.trim() ? 'not-allowed' : 'pointer',
+                  opacity: !isConnected || isImporting || !customDatasetDraft.dax.trim() ? 0.68 : 1,
+                }}
+              >
+                {isImporting ? '执行中...' : '保存并执行'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {datasetDialogMode === 'query-builder' && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(32, 31, 30, 0.24)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: 920,
+              maxWidth: '96%',
+              maxHeight: '88vh',
+              borderRadius: 18,
+              border: `1px solid ${shellPalette.border}`,
+              background: 'linear-gradient(180deg, #FFFEFB 0%, #F8FAFE 100%)',
+              boxShadow: '0 24px 64px rgba(15, 23, 42, 0.18)',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '18px 20px 14px',
+                borderBottom: `1px solid ${shellPalette.border}`,
+                background: 'linear-gradient(180deg, #FFFFFF 0%, #F7FAFE 100%)',
+              }}
+            >
+              {createGradientIcon('query-builder', '#FBBF24', '#F97316', 26)}
+              <div>
+                <div style={{ color: shellPalette.text, fontSize: 18, fontWeight: 700 }}>
+                  查询生成器
+                </div>
+                <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 12 }}>
+                  参考 DAX Studio Query Builder，通过选择维度、度量和筛选生成查询。
+                </div>
+              </div>
+            </div>
+
+            <div style={{ padding: 18, display: 'grid', gap: 14, overflow: 'auto' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 220px', gap: 12 }}>
+                <input
+                  type="text"
+                  value={queryBuilderDraft.name}
+                  onChange={(event) => setQueryBuilderDraft((previous) => ({ ...previous, name: event.target.value }))}
+                  placeholder="数据集名称"
+                  style={{
+                    width: '100%',
+                    padding: '11px 12px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.text,
+                    fontSize: 13,
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <select
+                  value={queryBuilderDraft.chartType}
+                  onChange={(event) => setQueryBuilderDraft((previous) => ({ ...previous, chartType: event.target.value as DatasetVisualType }))}
+                  style={{
+                    width: '100%',
+                    padding: '11px 12px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.text,
+                    fontSize: 13,
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {[
+                    { value: 'bar', label: '柱状图' },
+                    { value: 'line', label: '折线图' },
+                    { value: 'pie', label: '饼图' },
+                    { value: 'area', label: '面积图' },
+                    { value: 'scatter', label: '散点图' },
+                    { value: 'kpi-card', label: 'KPI 卡片' },
+                    { value: 'data-table', label: '数据表' },
+                  ].map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 12, minHeight: 560 }}>
                 <div
                   style={{
-                    minHeight: '100%',
-                    borderRadius: 14,
+                    borderRadius: 12,
                     border: `1px solid ${shellPalette.border}`,
-                    background: shellPalette.canvasBg,
-                    boxShadow: shellPalette.shadow,
+                    background: '#FFFFFF',
+                    display: 'flex',
+                    flexDirection: 'column',
                     overflow: 'hidden',
                   }}
                 >
-                  <ReportRenderer
-                    report={currentReport!}
-                    pages={currentPages}
-                    queries={currentQueries}
-                    theme={sampleTheme}
-                    dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
-                    apiBaseUrl={apiUrl}
-                    activeComponentId={activeImportedComponentId}
-                    showInspectorActions={showInspectorActions}
-                  />
+                  <div style={{ padding: 12, borderBottom: `1px solid ${shellPalette.border}`, display: 'grid', gap: 10 }}>
+                    <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 700 }}>
+                      字段池
+                    </div>
+                    <input
+                      type="text"
+                      value={queryBuilderSearch}
+                      onChange={(event) => setQueryBuilderSearch(event.target.value)}
+                      placeholder="搜索表、字段或度量值"
+                      style={{
+                        width: '100%',
+                        padding: '9px 10px',
+                        borderRadius: 10,
+                        border: `1px solid ${shellPalette.border}`,
+                        background: '#F8FAFD',
+                        color: shellPalette.text,
+                        fontSize: 12,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <div style={{ color: shellPalette.textMuted, fontSize: 11, lineHeight: 1.5 }}>
+                      参考 DAX Studio Query Builder。字段和度量值都从这里拖到右侧查询区域，也可把字段拖到筛选区域。
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', gap: 10 }}>
+                    {queryBuilderMetadataGroups.length === 0 ? (
+                      <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
+                        当前模型没有可用于查询生成器的字段，请先连接模型。
+                      </div>
+                    ) : queryBuilderMetadataGroups.map((group) => {
+                      const isExpanded = queryBuilderExpandedTables[group.key] ?? true;
+                      return (
+                        <div
+                          key={group.key}
+                          style={{
+                            borderRadius: 10,
+                            border: `1px solid ${shellPalette.border}`,
+                            background: '#FCFDFC',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleToggleQueryBuilderTableExpanded(group.key)}
+                            style={{
+                              width: '100%',
+                              padding: '10px 12px',
+                              border: 'none',
+                              borderBottom: isExpanded ? `1px solid ${shellPalette.border}` : 'none',
+                              background: 'transparent',
+                              color: shellPalette.text,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 8,
+                              cursor: 'pointer',
+                              textAlign: 'left',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <ShellIcon name="model" size={15} />
+                              <span style={{ fontSize: 12, fontWeight: 700 }}>{group.label}</span>
+                            </div>
+                            <ShellIcon name={isExpanded ? 'chevron-up' : 'chevron-down'} size={14} />
+                          </button>
+                          {isExpanded ? (
+                            <div style={{ display: 'grid', gap: 6, padding: 10 }}>
+                              {[...group.columns, ...group.measures].map((item) => {
+                                const isSelected = queryBuilderDraft.selections.some((selection) => selection.id === item.id);
+                                return (
+                                  <div
+                                    key={item.id}
+                                    draggable
+                                    onDragStart={(event) => handleQueryBuilderDragStart(event, item)}
+                                    style={{
+                                      display: 'grid',
+                                      gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                      gap: 8,
+                                      alignItems: 'center',
+                                      padding: '8px 10px',
+                                      borderRadius: 10,
+                                      border: `1px solid ${isSelected ? shellPalette.accentBorder : shellPalette.border}`,
+                                      background: isSelected ? shellPalette.accentSoft : '#FFFFFF',
+                                    }}
+                                  >
+                                    <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                      <ShellIcon name={item.kind === 'measure' ? 'measure' : 'column'} size={14} />
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600, lineHeight: 1.35 }}>
+                                          {item.name}
+                                        </div>
+                                        <div style={{ marginTop: 3, color: shellPalette.textMuted, fontSize: 10 }}>
+                                          {item.kind === 'measure' ? '度量值' : item.dataType || '字段'}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleQueryBuilderSelection(item)}
+                                        title={isSelected ? '移出查询区域' : '加入 Columns / Measures'}
+                                        style={{
+                                          width: 28,
+                                          height: 28,
+                                          borderRadius: 8,
+                                          border: `1px solid ${isSelected ? shellPalette.accentBorder : shellPalette.border}`,
+                                          background: isSelected ? shellPalette.accentSoft : '#FFFFFF',
+                                          color: isSelected ? shellPalette.accent : shellPalette.textMuted,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          cursor: 'pointer',
+                                        }}
+                                      >
+                                        <ShellIcon name="add" size={14} />
+                                      </button>
+                                      {item.kind === 'column' ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAddQueryBuilderFilter(item)}
+                                          title="添加为筛选条件"
+                                          style={{
+                                            width: 28,
+                                            height: 28,
+                                            borderRadius: 8,
+                                            border: `1px solid ${shellPalette.border}`,
+                                            background: '#FFFFFF',
+                                            color: shellPalette.textMuted,
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            cursor: 'pointer',
+                                          }}
+                                        >
+                                          <ShellIcon name="filter" size={14} />
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div
+                  style={{ minWidth: 0, display: 'grid', gap: 12, gridTemplateRows: 'minmax(220px, 1fr) minmax(180px, auto) minmax(220px, auto)' }}
+                >
+                  <div
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={handleDropQueryBuilderSelection}
+                    style={{
+                      borderRadius: 12,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: '#FFFFFF',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div style={{ padding: 12, borderBottom: `1px solid ${shellPalette.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <div>
+                        <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 700 }}>
+                          Columns / Measures
+                        </div>
+                        <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
+                          把字段或度量值拖到这里，统一构成查询结果列。
+                        </div>
+                      </div>
+                      <InfoPill label="已选" value={String(queryBuilderDraft.selections.length)} tone={queryBuilderDraft.selections.length > 0 ? 'accent' : 'default'} />
+                    </div>
+                    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', gap: 8, background: 'linear-gradient(180deg, #FCFDFF 0%, #F7FAFE 100%)' }}>
+                      {queryBuilderDraft.selections.length === 0 ? (
+                        <div
+                          style={{
+                            minHeight: 120,
+                            borderRadius: 10,
+                            border: `1px dashed ${shellPalette.accentBorder}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: shellPalette.textMuted,
+                            fontSize: 12,
+                            textAlign: 'center',
+                            padding: 16,
+                          }}
+                        >
+                          从左侧拖入字段或度量值
+                        </div>
+                      ) : queryBuilderDraft.selections.map((selection) => (
+                        <div
+                          key={selection.id}
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'minmax(0, 1fr) auto',
+                            gap: 8,
+                            alignItems: 'center',
+                            padding: '10px 12px',
+                            borderRadius: 10,
+                            border: `1px solid ${shellPalette.border}`,
+                            background: '#FFFFFF',
+                          }}
+                        >
+                          <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <ShellIcon name={selection.kind === 'measure' ? 'measure' : 'column'} size={15} />
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 700 }}>
+                                {selection.name}
+                              </div>
+                              <div style={{ marginTop: 3, color: shellPalette.textMuted, fontSize: 10 }}>
+                                {selection.tableName} · {selection.kind === 'measure' ? '度量值' : selection.dataType || '字段'}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleQueryBuilderSelection(selection)}
+                            style={{
+                              width: 28,
+                              height: 28,
+                              borderRadius: 8,
+                              border: `1px solid ${shellPalette.border}`,
+                              background: '#FFFFFF',
+                              color: shellPalette.textMuted,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <ShellIcon name="close" size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={handleDropQueryBuilderFilter}
+                    style={{
+                      borderRadius: 12,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: '#FFFFFF',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div style={{ padding: 12, borderBottom: `1px solid ${shellPalette.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <div>
+                        <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 700 }}>
+                          Filters
+                        </div>
+                        <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
+                          支持跨表筛选。将字段拖到这里，或点击字段行上的筛选按钮。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAddQueryBuilderFilter()}
+                        disabled={allQueryBuilderColumns.length === 0}
+                        style={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: 9,
+                          border: `1px solid ${shellPalette.border}`,
+                          background: '#FFFFFF',
+                          color: shellPalette.text,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: allQueryBuilderColumns.length === 0 ? 'not-allowed' : 'pointer',
+                          opacity: allQueryBuilderColumns.length === 0 ? 0.68 : 1,
+                        }}
+                      >
+                        <ShellIcon name="add" size={14} />
+                      </button>
+                    </div>
+                    <div style={{ padding: 12, display: 'grid', gap: 8, background: 'linear-gradient(180deg, #FCFDFC 0%, #F8FCFA 100%)' }}>
+                      {queryBuilderDraft.filters.length === 0 ? (
+                        <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
+                          当前没有筛选条件。
+                        </div>
+                      ) : queryBuilderDraft.filters.map((filter) => (
+                        <div key={filter.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 100px minmax(0, 1fr) auto', gap: 8, alignItems: 'center', padding: 10, borderRadius: 10, border: `1px solid ${shellPalette.border}`, background: '#FFFFFF' }}>
+                          <select
+                            value={filter.fieldId}
+                            onChange={(event) => {
+                              const nextField = allQueryBuilderColumns.find((column) => column.id === event.target.value);
+                              if (!nextField) {
+                                return;
+                              }
+                              handleChangeQueryBuilderFilter(filter.id, {
+                                fieldId: nextField.id,
+                                tableName: nextField.tableName,
+                                fieldName: nextField.name,
+                                dataType: nextField.dataType || 'String',
+                              });
+                            }}
+                            style={{
+                              width: '100%',
+                              padding: '9px 10px',
+                              borderRadius: 10,
+                              border: `1px solid ${shellPalette.border}`,
+                              background: '#FFFFFF',
+                              color: shellPalette.text,
+                              fontSize: 12,
+                              boxSizing: 'border-box',
+                            }}
+                          >
+                            {queryBuilderMetadataGroups.map((group) => (
+                              <optgroup key={group.key} label={group.label}>
+                                {group.columns.map((column) => (
+                                  <option key={column.id} value={column.id}>{column.name}</option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                          <select
+                            value={filter.operator}
+                            onChange={(event) => handleChangeQueryBuilderFilter(filter.id, { operator: event.target.value as QueryBuilderDraft['filters'][number]['operator'] })}
+                            style={{
+                              width: '100%',
+                              padding: '9px 10px',
+                              borderRadius: 10,
+                              border: `1px solid ${shellPalette.border}`,
+                              background: '#FFFFFF',
+                              color: shellPalette.text,
+                              fontSize: 12,
+                              boxSizing: 'border-box',
+                            }}
+                          >
+                            <option value="equals">等于</option>
+                            <option value="contains">包含</option>
+                          </select>
+                          <input
+                            type="text"
+                            value={filter.value}
+                            onChange={(event) => handleChangeQueryBuilderFilter(filter.id, { value: event.target.value })}
+                            placeholder="筛选值"
+                            style={{
+                              width: '100%',
+                              padding: '9px 10px',
+                              borderRadius: 10,
+                              border: `1px solid ${shellPalette.border}`,
+                              background: '#FFFFFF',
+                              color: shellPalette.text,
+                              fontSize: 12,
+                              boxSizing: 'border-box',
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveQueryBuilderFilter(filter.id)}
+                            style={{
+                              width: 30,
+                              height: 30,
+                              borderRadius: 9,
+                              border: `1px solid ${shellPalette.border}`,
+                              background: '#FFFFFF',
+                              color: shellPalette.textMuted,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <ShellIcon name="close" size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      borderRadius: 12,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: '#FFFFFF',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div style={{ padding: 12, borderBottom: `1px solid ${shellPalette.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <div>
+                        <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 700 }}>
+                          DAX 预览
+                        </div>
+                        <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
+                          将按 `SUMMARIZECOLUMNS` 生成查询文本。
+                        </div>
+                      </div>
+                      <InfoPill label="筛选" value={String(queryBuilderDraft.filters.length)} tone={queryBuilderDraft.filters.length > 0 ? 'success' : 'default'} />
+                    </div>
+                    <textarea
+                      value={generatedQueryBuilderDax}
+                      readOnly
+                      rows={12}
+                      style={{
+                        width: '100%',
+                        resize: 'none',
+                        minHeight: 220,
+                        padding: 14,
+                        border: 'none',
+                        background: '#FAFCFF',
+                        color: shellPalette.text,
+                        fontSize: 12,
+                        lineHeight: 1.65,
+                        boxSizing: 'border-box',
+                        fontFamily: 'Consolas, \"Courier New\", monospace',
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
-            )}
+
+              {importError ? (
+                <div style={{ color: shellPalette.error, fontSize: 12 }}>
+                  {importError}
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 10,
+                padding: '0 18px 18px',
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeDatasetDialog}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: 10,
+                  border: `1px solid ${shellPalette.border}`,
+                  background: '#FFFFFF',
+                  color: shellPalette.textMuted,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => { void handleCreateQueryBuilderDatasetFromDialog(); }}
+                disabled={!isConnected || isImporting}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #F59E0B 0%, #F97316 100%)',
+                  color: '#FFFFFF',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: !isConnected || isImporting ? 'not-allowed' : 'pointer',
+                  opacity: !isConnected || isImporting ? 0.68 : 1,
+                }}
+              >
+                {isImporting ? '执行中...' : '保存并执行'}
+              </button>
+            </div>
           </div>
-        )}
-        rightPane={showRightPane ? renderLeftPaneContent() : renderCollapsedRightPane()}
-      />
+        </div>
+      )}
 
       {showConnectDialog && (
         <div
@@ -4021,7 +5862,6 @@ export function App() {
             justifyContent: 'center',
             zIndex: 1001,
           }}
-          onClick={() => setShowConnectDialog(false)}
         >
           <div
             style={{
@@ -4045,13 +5885,13 @@ export function App() {
                 background: 'linear-gradient(180deg, #FFFFFF 0%, #F7FAFE 100%)',
               }}
             >
-              {createGradientIcon('◉', '#39D98A', '#0F8C72', 26, 12)}
+              {createGradientIcon('connect', '#39D98A', '#0F8C72', 26)}
               <div>
                 <div style={{ color: shellPalette.text, fontSize: 18, fontWeight: 700 }}>
-                  连接数据源
+                  连接模型
                 </div>
                 <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 12 }}>
-                  选择连接模式并填写地址。
+                  选择模型来源并填写地址。
                 </div>
               </div>
             </div>
@@ -4073,6 +5913,7 @@ export function App() {
                   onClick={() => {
                     setConnectionMode('pbi');
                     setConnectionDatabase('');
+                    setConnectionError('');
                   }}
                   style={{
                     padding: '10px 12px',
@@ -4090,7 +5931,11 @@ export function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setConnectionMode('tabular')}
+                  onClick={() => {
+                    setConnectionMode('tabular');
+                    setPowerBiScanMessage('');
+                    setConnectionError('');
+                  }}
                   style={{
                     padding: '10px 12px',
                     borderRadius: 10,
@@ -4110,24 +5955,83 @@ export function App() {
               <div style={{ marginTop: 18, display: 'grid', gap: 14 }}>
                 <div>
                   <div style={{ color: shellPalette.textMuted, fontSize: 12, marginBottom: 6 }}>
-                    {connectionMode === 'pbi' ? 'Power BI Desktop 地址' : '服务器地址'}
+                    {connectionMode === 'pbi' ? '模型地址' : '服务器地址'}
                   </div>
-                  <input
-                    type="text"
-                    value={connectionString}
-                    onChange={(event) => setConnectionString(event.target.value)}
-                    placeholder={connectionMode === 'pbi' ? 'localhost:12345' : 'localhost:2383 / powerbi://.../工作区'}
+                  <div
                     style={{
-                      width: '100%',
-                      padding: '11px 12px',
-                      borderRadius: 10,
-                      border: `1px solid ${shellPalette.border}`,
-                      background: '#FFFFFF',
-                      color: shellPalette.text,
-                      fontSize: 14,
-                      boxSizing: 'border-box',
+                      display: 'grid',
+                      gridTemplateColumns: connectionMode === 'pbi' ? 'minmax(0, 1fr) auto' : 'minmax(0, 1fr)',
+                      gap: 8,
+                      alignItems: 'center',
                     }}
-                  />
+                  >
+                    <input
+                      type="text"
+                      className="watermark-input"
+                      value={connectionString}
+                      onChange={(event) => setConnectionString(event.target.value)}
+                      placeholder={connectionMode === 'pbi' ? 'localhost:12345' : 'localhost:2383 / powerbi://.../工作区'}
+                      style={{
+                        width: '100%',
+                        padding: '11px 12px',
+                        borderRadius: 10,
+                        border: `1px solid ${shellPalette.border}`,
+                        background: '#FFFFFF',
+                        color: shellPalette.text,
+                        fontSize: 14,
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    {connectionMode === 'pbi' ? (
+                      <button
+                        type="button"
+                        onClick={() => { void handleScanPowerBi(); }}
+                        disabled={isScanningPowerBi}
+                        style={{
+                          padding: '11px 14px',
+                          borderRadius: 10,
+                          border: `1px solid ${shellPalette.accentBorder}`,
+                          background: isScanningPowerBi ? shellPalette.accentSoft : '#FFFFFF',
+                          color: shellPalette.accent,
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: isScanningPowerBi ? 'not-allowed' : 'pointer',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {isScanningPowerBi ? '扫描中...' : '扫描'}
+                      </button>
+                    ) : null}
+                  </div>
+                  {connectionMode === 'pbi' && powerBiScanItems.length > 0 ? (
+                    <div style={{ marginTop: 8 }}>
+                      <select
+                        value={selectedPowerBiScanId}
+                        onChange={(event) => handleSelectPowerBiScanItem(event.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          borderRadius: 10,
+                          border: `1px solid ${shellPalette.border}`,
+                          background: '#FFFFFF',
+                          color: shellPalette.text,
+                          fontSize: 13,
+                          boxSizing: 'border-box',
+                        }}
+                      >
+                        {powerBiScanItems.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+                  {connectionMode === 'pbi' && powerBiScanMessage ? (
+                    <div style={{ marginTop: 8, color: shellPalette.textMuted, fontSize: 12 }}>
+                      {powerBiScanMessage}
+                    </div>
+                  ) : null}
                 </div>
 
                 {connectionMode === 'tabular' ? (
@@ -4135,10 +6039,11 @@ export function App() {
                     <div style={{ color: shellPalette.textMuted, fontSize: 12, marginBottom: 6 }}>
                       数据库名（可选）
                     </div>
-                    <input
-                      type="text"
-                      value={connectionDatabase}
-                      onChange={(event) => setConnectionDatabase(event.target.value)}
+                  <input
+                    type="text"
+                    className="watermark-input"
+                    value={connectionDatabase}
+                    onChange={(event) => setConnectionDatabase(event.target.value)}
                       placeholder="留空时按默认数据库连接"
                       style={{
                         width: '100%',
@@ -4166,7 +6071,7 @@ export function App() {
                   }}
                 >
                   {connectionMode === 'pbi'
-                    ? '提示：在 Power BI Desktop 中使用“在 Excel 中分析”可看到当前本地 Analysis Services 端口，然后填入 localhost:端口。'
+                    ? '提示：可以直接输入 localhost:端口，或点击“扫描”从已打开的 Power BI Desktop 窗口中选择模型。'
                     : '提示：Tabular Server 模式可输入 localhost:2383、服务器地址或 powerbi:// 工作区地址；如有数据库名，可一并填写。'}
                 </div>
 
@@ -4364,9 +6269,14 @@ export function App() {
                   fontWeight: 500,
                   cursor: aiTestStatus === 'testing' || !aiApiKey ? 'not-allowed' : 'pointer',
                   marginBottom: 8,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
                 }}
               >
-                {aiTestStatus === 'testing' ? '测试中...' : '🔌 测试连接'}
+                <ShellIcon name="connect" size={14} />
+                {aiTestStatus === 'testing' ? '测试中...' : '测试连接'}
               </button>
               {aiTestStatus !== 'idle' && (
                 <div style={{
@@ -4386,10 +6296,15 @@ export function App() {
                   alignItems: 'center',
                   gap: 6,
                 }}>
-                  <span style={{ fontSize: 14 }}>
-                    {aiTestStatus === 'success' ? '✓' :
-                     aiTestStatus === 'testing' ? '⏳' :
-                     '✗'}
+                  <span style={{ display: 'inline-flex' }}>
+                    <ShellIcon
+                      name={aiTestStatus === 'success'
+                        ? 'check-circle'
+                        : aiTestStatus === 'testing'
+                          ? 'pending-circle'
+                          : 'error-circle'}
+                      size={14}
+                    />
                   </span>
                   {aiTestMessage}
                 </div>
