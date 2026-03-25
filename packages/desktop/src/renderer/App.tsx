@@ -80,6 +80,36 @@ const sampleDataSource: DataSourceConfig = {
   },
 };
 
+async function* readSseDataLines(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const rawLine = buffer.slice(0, newlineIndex).replace(/\r$/, '');
+      buffer = buffer.slice(newlineIndex + 1);
+
+      if (rawLine.startsWith('data: ')) {
+        yield rawLine.slice(6);
+      }
+
+      newlineIndex = buffer.indexOf('\n');
+    }
+
+    if (done) {
+      const trailingLine = buffer.trim();
+      if (trailingLine.startsWith('data: ')) {
+        yield trailingLine.slice(6);
+      }
+      return;
+    }
+  }
+}
+
 type QueryRow = Record<string, unknown>;
 type RibbonTabId = 'home' | 'dataset' | 'ai' | 'view';
 type WorkspaceRailId = WorkspaceMode;
@@ -1452,7 +1482,7 @@ export function App() {
   const [showConnectDialog, setShowConnectDialog] = useState(false);
 
   // AI Generation state
-  const [userPrompt, setUserPrompt] = useState<string>('创建一个销售分析报表，包含关键指标、趋势图表和分类占比');
+  const [userPrompt, setUserPrompt] = useState<string>('请先基于当前模型和可见素材，自主设计一版专业、美观、信息层级清晰的 BI 报表。生成完成后，我会基于结果自动生成可编辑的修改提示词。');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<string>('');
   const [generatedReport, setGeneratedReport] = useState<ReportDefinition | null>(null);
@@ -3093,6 +3123,7 @@ export function App() {
     });
     setGeneratedPages(normalizedPages);
     setGeneratedQueries(draft.queries);
+    setUserPrompt(buildReversePromptFromContext(report, normalizedPages, draft.queries));
     setImportSummary((previous) => previous.map((item) => {
       const rendered = draft.renderedSummaryMap.get(item.id);
       if (!rendered) {
@@ -3173,7 +3204,6 @@ export function App() {
       }
 
       const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
 
       if (!reader) {
         throw new Error('无法读取响应流');
@@ -3181,55 +3211,40 @@ export function App() {
 
       let applied = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
+      for await (const json of readSseDataLines(reader)) {
+        let progress: {
+          step?: string;
+          message?: string;
+          report?: ReportDefinition;
+          pages?: PageDefinition[];
+        };
+
+        try {
+          progress = JSON.parse(json);
+        } catch {
+          continue;
         }
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        if (progress.message || progress.step) {
+          setGenerationProgress(progress.message || progress.step || '');
+        }
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) {
-            continue;
+        if (progress.step === 'error') {
+          throw new Error(progress.message || 'AI 设计失败');
+        }
+
+        if (progress.step === 'complete') {
+          if (!progress.report || !Array.isArray(progress.pages) || progress.pages.length === 0) {
+            throw new Error('AI 已返回完成状态，但没有给出可用的页面布局。');
           }
 
-          const json = line.substring(6);
-          let progress: {
-            step?: string;
-            message?: string;
-            report?: ReportDefinition;
-            pages?: PageDefinition[];
-          };
-
-          try {
-            progress = JSON.parse(json);
-          } catch {
-            continue;
-          }
-
-          if (progress.message || progress.step) {
-            setGenerationProgress(progress.message || progress.step || '');
-          }
-
-          if (progress.step === 'error') {
-            throw new Error(progress.message || 'AI 设计失败');
-          }
-
-          if (progress.step === 'complete') {
-            if (!progress.report || !Array.isArray(progress.pages) || progress.pages.length === 0) {
-              throw new Error('AI 已返回完成状态，但没有给出可用的页面布局。');
-            }
-
-            applyAiDesignedAssetReport(
-              draft,
-              progress.report,
-              progress.pages,
-              progress.message || `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`
-            );
-            applied = true;
-          }
+          applyAiDesignedAssetReport(
+            draft,
+            progress.report,
+            progress.pages,
+            progress.message || `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`
+          );
+          applied = true;
         }
       }
 
@@ -3290,24 +3305,34 @@ export function App() {
     setShowChatPanel(false);
   };
 
-  // Generate reverse prompt from current report
-  const generateReversePrompt = (): string => {
-    if (!currentReport || currentPages.length === 0) {
+  const buildReversePromptFromContext = (
+    report: ReportDefinition | null | undefined,
+    pages: PageDefinition[],
+    queries: QueryDefinition[]
+  ): string => {
+    if (!report || pages.length === 0) {
       return '当前没有报表。请描述你想要创建的报表。';
     }
 
-    const page = currentPages[0];
     const lines: string[] = [];
-    lines.push('当前报表包含以下组件：');
+    lines.push(`当前报表: ${report.name}`);
+    if (report.description) {
+      lines.push(`报表说明: ${report.description}`);
+    }
+    lines.push('');
+    lines.push('当前报表包含以下页面与组件：');
     lines.push('');
 
-    page.components.forEach((comp, idx) => {
-      const query = currentQueries.find(q => q.id === comp.queryRef);
-      lines.push(`${idx + 1}. "${comp.config?.title || comp.id}" - ${comp.type}`);
-      lines.push(`   位置: x=${comp.position.x}, y=${comp.position.y}, w=${comp.position.w}, h=${comp.position.h}`);
-      if (query) {
-        lines.push(`   DAX: ${query.dax.slice(0, 80)}${query.dax.length > 80 ? '...' : ''}`);
-      }
+    pages.forEach((page, pageIndex) => {
+      lines.push(`${pageIndex + 1}. 页面 "${page.name}"`);
+      page.components.forEach((comp, idx) => {
+        const query = queries.find((q) => q.id === comp.queryRef);
+        lines.push(`   ${idx + 1}) "${comp.config?.title || comp.id}" - ${comp.type}`);
+        lines.push(`      位置: x=${comp.position.x}, y=${comp.position.y}, w=${comp.position.w}, h=${comp.position.h}`);
+        if (query) {
+          lines.push(`      DAX: ${query.dax.slice(0, 80)}${query.dax.length > 80 ? '...' : ''}`);
+        }
+      });
       lines.push('');
     });
 
@@ -3319,6 +3344,9 @@ export function App() {
 
     return lines.join('\n');
   };
+
+  // Generate reverse prompt from current report
+  const generateReversePrompt = (): string => buildReversePromptFromContext(currentReport, currentPages, currentQueries);
 
   // Toggle chat panel and initialize with reverse prompt
   const handleToggleChatPanel = () => {
@@ -3384,7 +3412,6 @@ export function App() {
       }
 
       const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
 
       if (!reader) {
         throw new Error('无法读取响应流');
@@ -3392,38 +3419,26 @@ export function App() {
 
       let assistantMessage = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      for await (const json of readSseDataLines(reader)) {
+        try {
+          const progress = JSON.parse(json);
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+          if (progress.step === 'complete' && progress.report) {
+            const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
+            const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const json = line.substring(6);
-            try {
-              const progress = JSON.parse(json);
-
-              if (progress.step === 'complete' && progress.report) {
-                // Update report with refined version
-                setGeneratedReport(progress.report);
-                if (progress.pages) {
-                  setGeneratedPages(progress.pages);
-                }
-                if (progress.queries) {
-                  setGeneratedQueries(progress.queries);
-                }
-                assistantMessage = progress.message || '报表已更新';
-              } else if (progress.step === 'error') {
-                assistantMessage = `错误: ${progress.message}`;
-              } else {
-                assistantMessage = progress.message || progress.step;
-              }
-            } catch {
-              // Ignore parse errors
-            }
+            setGeneratedReport(progress.report);
+            setGeneratedPages(nextPages);
+            setGeneratedQueries(nextQueries);
+            setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
+            assistantMessage = progress.message || '报表已更新';
+          } else if (progress.step === 'error') {
+            assistantMessage = `错误: ${progress.message}`;
+          } else {
+            assistantMessage = progress.message || progress.step;
           }
+        } catch {
+          // Ignore parse errors
         }
       }
 
@@ -3501,55 +3516,38 @@ export function App() {
       }
 
       const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
 
       if (!reader) {
         throw new Error('无法读取响应流');
       }
 
-      let reportJson = '';
+      for await (const json of readSseDataLines(reader)) {
+        try {
+          const progress = JSON.parse(json);
+          setGenerationProgress(progress.message || progress.step);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+          if (progress.step === 'complete' && progress.report) {
+            const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
+            const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const json = line.substring(6);
-            try {
-              const progress = JSON.parse(json);
-              setGenerationProgress(progress.message || progress.step);
-
-              if (progress.step === 'complete' && progress.report) {
-                const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
-                const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
-
-                if (nextPages.length === 0) {
-                  setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
-                  continue;
-                }
-
-                setGeneratedReport(progress.report);
-                setGeneratedPages(nextPages);
-                setGeneratedQueries(nextQueries);
-                setActiveImportedComponentId(undefined);
-                setGenerationProgress(
-                  progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
-                );
-              } else if (progress.step === 'error') {
-                setGenerationProgress(`错误: ${progress.message}`);
-              }
-
-              if (progress.partialContent) {
-                reportJson += progress.partialContent;
-              }
-            } catch {
-              // Ignore parse errors
+            if (nextPages.length === 0) {
+              setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
+              continue;
             }
+
+            setGeneratedReport(progress.report);
+            setGeneratedPages(nextPages);
+            setGeneratedQueries(nextQueries);
+            setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
+            setActiveImportedComponentId(undefined);
+            setGenerationProgress(
+              progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
+            );
+          } else if (progress.step === 'error') {
+            setGenerationProgress(`错误: ${progress.message}`);
           }
+        } catch {
+          // Ignore parse errors
         }
       }
     } catch (err) {
