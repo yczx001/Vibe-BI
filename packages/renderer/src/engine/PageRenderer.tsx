@@ -1,5 +1,5 @@
 import type { PageDefinition, QueryDefinition, DataSourceConfig } from '@vibe-bi/core';
-import { GridLayout } from './GridLayout';
+import { GridLayout, resolveGridLayout } from './GridLayout';
 import { ComponentBridge } from './ComponentBridge';
 
 export interface PageRendererProps {
@@ -21,6 +21,14 @@ export function PageRenderer({
   activeComponentId,
   showInspectorActions = false,
 }: PageRendererProps) {
+  const layout = resolveGridLayout(page.layout);
+  const filters = Array.isArray(page.filters) ? page.filters : [];
+  const components = Array.isArray(page.components)
+    ? page.components.filter((component): component is PageDefinition['components'][number] => (
+      Boolean(component) && typeof component === 'object'
+    ))
+    : [];
+
   return (
     <div
       className="vibe-page"
@@ -28,11 +36,11 @@ export function PageRenderer({
         width: '100%',
         height: '100%',
         overflow: 'auto',
-        padding: page.layout.padding,
+        padding: layout.padding,
       }}
     >
       {/* Filters Bar */}
-      {page.filters.length > 0 && (
+      {filters.length > 0 && (
         <div
           className="vibe-filters"
           style={{
@@ -42,7 +50,7 @@ export function PageRenderer({
             flexWrap: 'wrap',
           }}
         >
-          {page.filters.map((filter) => (
+          {filters.map((filter) => (
             <div key={filter.id} className="vibe-filter-item">
               {/* Filter component will be rendered here */}
               <span style={{ opacity: 0.6 }}>{filter.type}: {filter.target.table}.{filter.target.column}</span>
@@ -52,8 +60,8 @@ export function PageRenderer({
       )}
 
       {/* Grid Layout */}
-      <GridLayout layout={page.layout}>
-        {page.components.map((component) => (
+      <GridLayout layout={layout}>
+        {components.map((component) => (
           <ComponentBridge
             key={component.id}
             component={component}

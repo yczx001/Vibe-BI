@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import type { FilterDefinition } from '@vibe-bi/core';
 
 interface FilterContextValue {
@@ -12,23 +12,30 @@ const FilterContext = createContext<FilterContextValue | null>(null);
 
 export interface FilterProviderProps {
   children: React.ReactNode;
-  initialFilters: FilterDefinition[];
+  initialFilters?: FilterDefinition[] | null;
+}
+
+function buildDefaultFilters(initialFilters?: FilterDefinition[] | null): Record<string, unknown> {
+  const resolvedFilters = Array.isArray(initialFilters) ? initialFilters : [];
+  const defaults: Record<string, unknown> = {};
+
+  for (const filter of resolvedFilters) {
+    if (filter.default?.value !== undefined) {
+      defaults[filter.id] = filter.default.value;
+    } else if (filter.default?.relative) {
+      defaults[filter.id] = calculateRelativeDate(filter.default.relative);
+    }
+  }
+
+  return defaults;
 }
 
 export function FilterProvider({ children, initialFilters }: FilterProviderProps) {
-  const [filters, setFilters] = useState<Record<string, unknown>>(() => {
-    // Initialize with default values
-    const defaults: Record<string, unknown> = {};
-    for (const filter of initialFilters) {
-      if (filter.default?.value !== undefined) {
-        defaults[filter.id] = filter.default.value;
-      } else if (filter.default?.relative) {
-        // Calculate relative date
-        defaults[filter.id] = calculateRelativeDate(filter.default.relative);
-      }
-    }
-    return defaults;
-  });
+  const [filters, setFilters] = useState<Record<string, unknown>>(() => buildDefaultFilters(initialFilters));
+
+  useEffect(() => {
+    setFilters(buildDefaultFilters(initialFilters));
+  }, [initialFilters]);
 
   const setFilter = useCallback((filterId: string, value: unknown) => {
     setFilters((prev) => ({ ...prev, [filterId]: value }));

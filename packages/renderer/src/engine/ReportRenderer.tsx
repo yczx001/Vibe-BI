@@ -40,24 +40,44 @@ export function ReportRenderer({
       reportName: report?.name,
       pagesCount: pages?.length,
       queriesCount: queries?.length,
-      pageIds: pages?.map(p => p.id),
+      pageIds: Array.isArray(pages) ? pages.filter(Boolean).map((page) => page.id) : [],
       defaultPage: report?.defaultPage,
       dataSourceType: dataSource?.type,
     });
   }, [report, pages, queries, dataSource]);
 
-  const [currentPageId, setCurrentPageId] = React.useState(initialPage || report.defaultPage || report.pages[0]);
+  const safePages = useMemo(
+    () => (Array.isArray(pages)
+      ? pages
+        .filter((page): page is PageDefinition => Boolean(page) && typeof page === 'object' && typeof page.id === 'string')
+        .map((page) => ({
+          ...page,
+          filters: Array.isArray(page.filters) ? page.filters : [],
+          components: Array.isArray(page.components) ? page.components : [],
+        }))
+      : []),
+    [pages]
+  );
+
+  const preferredPageId = initialPage || report.defaultPage || safePages[0]?.id || '';
+  const [currentPageId, setCurrentPageId] = React.useState(preferredPageId);
+
+  React.useEffect(() => {
+    if (!currentPageId || !safePages.some((page) => page.id === currentPageId)) {
+      setCurrentPageId(preferredPageId);
+    }
+  }, [currentPageId, preferredPageId, safePages]);
 
   const currentPage = useMemo(
-    () => pages.find((p) => p.id === currentPageId) || pages[0],
-    [pages, currentPageId]
+    () => safePages.find((p) => p.id === currentPageId) || safePages[0],
+    [safePages, currentPageId]
   );
   const dividerColor = 'rgba(32, 31, 30, 0.12)';
   const mutedSurface = 'rgba(243, 242, 241, 0.9)';
 
   const pageIndex = useMemo(
-    () => pages.findIndex((p) => p.id === currentPageId),
-    [pages, currentPageId]
+    () => safePages.findIndex((p) => p.id === currentPageId),
+    [safePages, currentPageId]
   );
 
   React.useEffect(() => {
@@ -65,14 +85,31 @@ export function ReportRenderer({
       return;
     }
 
-    const owningPage = pages.find((page) => page.components.some((component) => component.id === activeComponentId));
+    const owningPage = safePages.find((page) => page.components.some((component) => component.id === activeComponentId));
     if (owningPage && owningPage.id !== currentPageId) {
       setCurrentPageId(owningPage.id);
     }
-  }, [activeComponentId, pages, currentPageId]);
+  }, [activeComponentId, safePages, currentPageId]);
 
   if (!currentPage) {
-    return <div>No page found</div>;
+    return (
+      <ThemeProvider theme={theme}>
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: theme.colors.background,
+            color: theme.colors.textSecondary,
+            fontFamily: theme.typography.fontFamily,
+          }}
+        >
+          当前报表没有可渲染的页面。
+        </div>
+      </ThemeProvider>
+    );
   }
 
   return (
@@ -89,7 +126,7 @@ export function ReportRenderer({
           }}
         >
           {/* Page Tabs */}
-          {pages.length > 1 && (
+          {safePages.length > 1 && (
             <div
               className="vibe-page-tabs"
               style={{
@@ -100,7 +137,7 @@ export function ReportRenderer({
                 backgroundColor: theme.colors.surface,
               }}
             >
-              {pages.map((page) => (
+              {safePages.map((page) => (
                 <button
                   key={page.id}
                   onClick={() => setCurrentPageId(page.id)}
