@@ -3,7 +3,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile, spawn, ChildProcess } from 'child_process';
 import { promises as fs } from 'fs';
-import { promisify } from 'util';
+import { format, promisify } from 'util';
 
 // ES Module __dirname polyfill (relative to dist/main/index.js)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -11,6 +11,49 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let dotnetProcess: ChildProcess | null = null;
 let apiPort: number = 0;
 const execFileAsync = promisify(execFile);
+
+function isIgnorablePipeError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
+}
+
+function writeLog(stream: NodeJS.WriteStream | null | undefined, args: unknown[]) {
+  if (!stream || stream.destroyed || !stream.writable) {
+    return;
+  }
+
+  try {
+    stream.write(`${format(...args)}\n`);
+  } catch (error) {
+    if (!isIgnorablePipeError(error)) {
+      throw error;
+    }
+  }
+}
+
+function logInfo(...args: unknown[]) {
+  writeLog(process.stdout, args);
+}
+
+function logError(...args: unknown[]) {
+  writeLog(process.stderr, args);
+}
+
+process.stdout?.on('error', (error) => {
+  if (!isIgnorablePipeError(error)) {
+    throw error;
+  }
+});
+
+process.stderr?.on('error', (error) => {
+  if (!isIgnorablePipeError(error)) {
+    throw error;
+  }
+});
 
 // Keep a global reference of the window object
 let mainWindow: BrowserWindow | null = null;
@@ -128,28 +171,28 @@ async function startDotNetBackend(): Promise<number> {
 
     dotnetProcess.stdout?.on('data', (data: Buffer) => {
       const output = data.toString();
-      console.log('[.NET]', output);
+      logInfo('[.NET]', output);
 
       // Parse port from output
       const match = output.match(/Now listening on: http:\/\/127\.0\.0\.1:(\d+)/);
       if (match && !apiPort) {
         apiPort = Number.parseInt(match[1], 10);
-        console.log('[Electron] .NET backend started on port:', apiPort);
+        logInfo('[Electron] .NET backend started on port:', apiPort);
         finishResolve(apiPort);
       }
     });
 
     dotnetProcess.stderr?.on('data', (data: Buffer) => {
-      console.error('[.NET Error]', data.toString());
+      logError('[.NET Error]', data.toString());
     });
 
     dotnetProcess.on('error', (err) => {
-      console.error('[Electron] Failed to start .NET:', err);
+      logError('[Electron] Failed to start .NET:', err);
       finishReject(err instanceof Error ? err : new Error(String(err)));
     });
 
     dotnetProcess.on('exit', (code) => {
-      console.log(`[Electron] .NET process exited with code ${code}`);
+      logInfo(`[Electron] .NET process exited with code ${code}`);
       dotnetProcess = null;
       if (!settled && !apiPort) {
         finishReject(new Error(`.NET backend exited before startup completed (code: ${code ?? 'unknown'})`));
@@ -160,7 +203,7 @@ async function startDotNetBackend(): Promise<number> {
 
 function stopDotNetBackend() {
   if (dotnetProcess) {
-    console.log('[Electron] Stopping .NET backend...');
+    logInfo('[Electron] Stopping .NET backend...');
     dotnetProcess.kill();
     dotnetProcess = null;
   }
@@ -252,7 +295,7 @@ async function createWindow() {
   try {
     await startDotNetBackend();
   } catch (err) {
-    console.error('[Electron] Failed to start backend:', err);
+    logError('[Electron] Failed to start backend:', err);
     dialog.showErrorBox('启动失败', '无法启动后端服务，请检查 .NET 10 是否已安装。');
     app.quit();
     return;
@@ -274,22 +317,22 @@ async function createWindow() {
 
   // Load URL based on environment
   const preloadPath = path.join(__dirname, '../../dist-electron/index.js');
-  console.log('[Electron] Preload path:', preloadPath);
+  logInfo('[Electron] Preload path:', preloadPath);
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    console.log('[Electron] Loading dev server URL:', process.env.VITE_DEV_SERVER_URL);
+    logInfo('[Electron] Loading dev server URL:', process.env.VITE_DEV_SERVER_URL);
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     const htmlPath = path.join(__dirname, '../renderer/index.html');
-    console.log('[Electron] Loading file:', htmlPath);
+    logInfo('[Electron] Loading file:', htmlPath);
     await mainWindow.loadFile(htmlPath);
   }
 
-  console.log('[Electron] Window loaded successfully');
+  logInfo('[Electron] Window loaded successfully');
 
   // Log any console messages from renderer
   mainWindow.webContents.on('console-message', (details) => {
-    console.log(`[Renderer ${details.level}]`, details.message);
+    logInfo(`[Renderer ${details.level}]`, details.message);
   });
 
   mainWindow.on('closed', () => {
