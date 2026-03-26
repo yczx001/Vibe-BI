@@ -157,7 +157,21 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
       });
 
       if (!response.ok) {
-        throw new Error(`Query failed: ${response.statusText}`);
+        const errorText = await response.text();
+        let detailedMessage = `Query failed: ${response.statusText}`;
+
+        if (errorText) {
+          try {
+            const parsed = JSON.parse(errorText) as { message?: string; dax?: string };
+            if (parsed.message) {
+              detailedMessage = parsed.message;
+            }
+          } catch {
+            detailedMessage = errorText;
+          }
+        }
+
+        throw new Error(detailedMessage);
       }
 
       const result: QueryResult = await response.json();
@@ -169,7 +183,13 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
       cache.set(cacheKey, { data: enrichedRows, timestamp: Date.now() });
     } catch (err) {
       console.error('[useQueryData] Error fetching data for query:', query?.id, err);
-      setError(err instanceof Error ? err : new Error(String(err)));
+      if (cached?.data) {
+        console.warn('[useQueryData] Falling back to stale cached data for query:', query?.id);
+        setData(cached.data);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
     } finally {
       setLoading(false);
     }

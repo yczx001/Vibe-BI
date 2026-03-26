@@ -13,6 +13,7 @@ public class ClaudeProvider : IAIProvider
     private const string DefaultBaseUrl = "https://api.anthropic.com";
     private const string DefaultModel = "claude-3-5-sonnet-20241022";
     private const string AnthropicApiVersion = "2023-06-01";
+    private const int DefaultMaxTokens = 8192;
 
     public ClaudeProvider(string apiKey, string? baseUrl = null, string? model = null)
     {
@@ -32,7 +33,7 @@ public class ClaudeProvider : IAIProvider
         var requestBody = new Dictionary<string, object?>
         {
             ["model"] = _model,
-            ["max_tokens"] = 4096,
+            ["max_tokens"] = DefaultMaxTokens,
             ["temperature"] = 0,
             ["messages"] = new[]
             {
@@ -88,7 +89,7 @@ public class ClaudeProvider : IAIProvider
         var requestBody = new Dictionary<string, object?>
         {
             ["model"] = _model,
-            ["max_tokens"] = 4096,
+            ["max_tokens"] = DefaultMaxTokens,
             ["temperature"] = 0,
             ["messages"] = new[]
             {

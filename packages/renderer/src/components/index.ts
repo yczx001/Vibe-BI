@@ -2,7 +2,9 @@ import type { ComponentRenderer } from './registry';
 import { EChartsWrapper } from './charts/EChartsWrapper';
 import { KpiCard } from './kpi/KpiCard';
 import { DataTable } from './table/DataTable';
-import type { ChartConfig, KpiConfig, TableConfig } from '@vibe-bi/core';
+import { TextBlock } from './text/TextBlock';
+import { FilterCard } from './filter/FilterCard';
+import type { ChartConfig, FilterComponentConfig, KpiConfig, TableConfig, TextConfig } from '@vibe-bi/core';
 
 // Register all components
 export const chartComponents: ComponentRenderer<ChartConfig>[] = [
@@ -43,9 +45,37 @@ export const tableComponents: ComponentRenderer<TableConfig>[] = [
   },
 ];
 
+export const textComponents: ComponentRenderer<TextConfig>[] = [
+  {
+    type: 'text',
+    component: TextBlock,
+    defaultConfig: {
+      content: '',
+      align: 'left',
+    },
+    icon: 'text',
+    name: '文本',
+  },
+];
+
+export const filterComponents: ComponentRenderer<FilterComponentConfig>[] = [
+  {
+    type: 'filter',
+    component: FilterCard,
+    defaultConfig: {
+      filterId: '',
+      label: '筛选器',
+    },
+    icon: 'filter',
+    name: '筛选器',
+  },
+];
+
 // Export all for registration
 export const allComponents = [
   ...chartComponents,
   ...kpiComponents,
   ...tableComponents,
+  ...textComponents,
+  ...filterComponents,
 ] as ComponentRenderer<any>[];

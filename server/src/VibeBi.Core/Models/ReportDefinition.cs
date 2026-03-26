@@ -12,6 +12,7 @@ public record ReportDefinition
     public string? GenerationMode { get; init; }
     public required List<string> Pages { get; init; } = new();
     public string? DefaultPage { get; init; }
+    public ThemeDefinition? Theme { get; init; }
 }
 
 public record DataSourceConfig

@@ -18,6 +18,7 @@ export interface ReportDefinition {
   generationMode?: 'ai-generated' | 'manual' | 'imported';
   pages: string[];
   defaultPage?: string;
+  theme?: ThemeDefinition;
 }
 
 // ============================================================================
@@ -132,6 +133,7 @@ export type ChartType = 'line' | 'bar' | 'pie' | 'area' | 'scatter' | 'radar' | 
 
 export interface ChartConfig {
   chartType: ChartType;
+  orientation?: 'vertical' | 'horizontal';
   title?: string;
   xAxis?: AxisConfig;
   yAxis?: AxisConfig[];
@@ -175,6 +177,10 @@ export interface KpiConfig {
   valueField: string;
   format?: ValueFormat;
   comparison?: ComparisonConfig;
+  comparisonField?: string;
+  compareField?: string;
+  comparisonTitle?: string;
+  showCompare?: boolean;
   icon?: string;
 }
 
@@ -182,6 +188,8 @@ export interface ValueFormat {
   type: 'number' | 'currency' | 'percentage' | 'custom';
   currency?: string;
   decimals?: number;
+  prefix?: string;
+  suffix?: string;
   customFormat?: string;
 }
 
@@ -206,7 +214,9 @@ export interface TableConfig {
 export interface TableColumnConfig {
   field: string;
   header: string;
-  width?: number;
+  title?: string;
+  width?: number | string;
+  align?: 'left' | 'center' | 'right';
   sortable?: boolean;
   format?: ValueFormat;
 }
@@ -222,6 +232,7 @@ export interface PaginationConfig {
 
 export interface TextConfig {
   content: string;
+  html?: boolean;
   fontSize?: number;
   fontWeight?: 'normal' | 'bold' | 'lighter';
   color?: string;
@@ -236,6 +247,7 @@ export interface FilterComponentConfig {
   filterId: string;
   label?: string;
   placeholder?: string;
+  definition?: FilterDefinition;
 }
 
 // ============================================================================

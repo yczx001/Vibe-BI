@@ -83,6 +83,31 @@ type BackendLaunchConfig = {
   cwd: string;
 };
 
+function getAiConversationStatePath(): string {
+  if (app.isPackaged) {
+    return path.join(app.getPath('userData'), 'logs', 'ai-conversations', 'latest.json');
+  }
+
+  return path.join(__dirname, '..', '..', '..', '..', '.codex-logs', 'ai-conversations', 'latest.json');
+}
+
+async function readOptionalTextFile(filePath: string): Promise<string | null> {
+  try {
+    const buffer = await fs.readFile(filePath);
+    return decodeTextFile(buffer);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : '';
+
+    if (code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 function decodeTextFile(buffer: Buffer): string {
   if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
     return buffer.toString('utf8', 3);
@@ -397,4 +422,19 @@ ipcMain.handle('save-file', async (_, defaultName: string) => {
 
 ipcMain.handle('scan-powerbi-instances', async () => {
   return scanPowerBiInstances();
+});
+
+ipcMain.handle('get-ai-conversation-path', () => {
+  return getAiConversationStatePath();
+});
+
+ipcMain.handle('read-ai-conversation-state', async () => {
+  return readOptionalTextFile(getAiConversationStatePath());
+});
+
+ipcMain.handle('write-ai-conversation-state', async (_, content: string) => {
+  const targetPath = getAiConversationStatePath();
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, content, 'utf8');
+  return targetPath;
 });

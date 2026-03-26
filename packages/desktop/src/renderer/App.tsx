@@ -5,7 +5,7 @@ import {
   CommandButton,
   InfoPill,
   PaneCard,
-  PaneSurface,
+  RightPaneSurface,
   RibbonBar,
   RibbonGroup,
   RibbonTabs,
@@ -17,6 +17,8 @@ import {
 } from './components/DesktopShell';
 import { ShellIcon, type ShellIconName } from './components/ShellIcon';
 import { DataWorkbench } from './components/DataWorkbench';
+import { BasicDatasetPreview } from './components/BasicDatasetPreview';
+import { ReportCanvasViewport } from './components/ReportCanvasViewport';
 import type {
   CustomDatasetDraft,
   DatasetImportMode,
@@ -29,24 +31,24 @@ import type {
 } from './types/workspace';
 
 const sampleTheme: ThemeDefinition = {
-  name: 'Vibe Desktop Light',
+  name: 'Vibe Editorial Light',
   colors: {
-    primary: '#0F6CBD',
-    secondary: '#8764B8',
-    background: '#F3F2F1',
-    surface: '#FFFFFF',
-    text: '#201F1E',
-    textSecondary: '#605E5C',
-    chart: ['#0F6CBD', '#8764B8', '#038387', '#CA5010', '#107C10', '#B146C2'],
+    primary: '#0E7490',
+    secondary: '#C97A32',
+    background: '#F4F1EA',
+    surface: '#FCFBF8',
+    text: '#152132',
+    textSecondary: '#617082',
+    chart: ['#0E7490', '#2563EB', '#C97A32', '#7C9A4D', '#8B5E3C', '#C2410C'],
   },
   typography: {
-    fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+    fontFamily: '"Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
   },
   components: {
     card: {
-      borderRadius: 10,
-      shadow: '0 1px 2px rgba(0,0,0,0.08)',
-      padding: 18,
+      borderRadius: 22,
+      shadow: '0 18px 40px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255,255,255,0.76)',
+      padding: 22,
     },
   },
 };
@@ -58,6 +60,225 @@ const sampleDataSource: DataSourceConfig = {
     database: 'Test',
   },
 };
+
+const DEFAULT_REPORT_CANVAS_WIDTH = 1920;
+const DEFAULT_REPORT_CANVAS_HEIGHT = 1080;
+const REPORT_CANVAS_MIN_ZOOM_PERCENT = 30;
+const REPORT_CANVAS_MAX_ZOOM_PERCENT = 180;
+
+function clampReportCanvasZoom(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 100;
+  }
+
+  return Math.max(
+    REPORT_CANVAS_MIN_ZOOM_PERCENT,
+    Math.min(REPORT_CANVAS_MAX_ZOOM_PERCENT, Math.round(value))
+  );
+}
+
+function summarizeUserIntentPreview(text: string, maxLength = 72): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function buildAiExecutionPlanLines(mode: PersistedAiComposerMode, intent: string): string[] {
+  const intentPreview = summarizeUserIntentPreview(intent);
+  const planLines = mode === 'refine'
+    ? [
+      '先分析当前报表结构、主题和组件约束。',
+      '再锁定本轮需要调整的主题、图表类型、布局或标题文案。',
+      '生成新的报表 JSON 后继续校验，必要时自动修复查询与结构问题。',
+    ]
+    : [
+      '先分析模型或当前素材，提炼本页的业务叙事和重点指标。',
+      '再规划主视觉区、KPI 区、趋势区和结构区，避免平均平铺。',
+      '生成完整报表 JSON 后继续校验，必要时自动修复查询与结构问题。',
+    ];
+
+  return [
+    `已接收需求：${intentPreview || '开始新的 AI 会话。'}`,
+    ...planLines,
+  ];
+}
+
+function mapAiProgressToTraceLine(step?: string, message?: string): string | null {
+  switch (step) {
+    case 'reading_metadata':
+      return `分析数据模型：${message || '正在读取表、字段和度量。'}`;
+    case 'validating':
+      return `分析当前报表：${message || '正在整理页面、组件和查询上下文。'}`;
+    case 'building_prompt':
+      return `制定执行方案：${message || '正在生成本轮可落地的设计与修改约束。'}`;
+    case 'generating':
+      return `生成报表定义：${message || '正在组织主题、布局和图表配置。'}`;
+    case 'refining':
+      return `修改报表定义：${message || '正在按要求调整主题、图表和版式。'}`;
+    case 'parsing':
+      return `校验返回结果：${message || '正在解析 JSON 并补齐必需结构。'}`;
+    case 'repairing_queries':
+      return `自动修复问题：${message || '检测到查询或字段映射问题，继续修复。'}`;
+    case 'complete':
+      return `执行完成：${message || '本轮结果已应用到当前画布。'}`;
+    case 'error':
+      return `执行异常：${message || 'AI 返回了错误。'}`;
+    default:
+      if (!message?.trim()) {
+        return null;
+      }
+
+      return message.trim();
+  }
+}
+
+function mergeThemeWithFallback(theme?: ThemeDefinition | null): ThemeDefinition {
+  return {
+    ...sampleTheme,
+    ...theme,
+    colors: {
+      ...sampleTheme.colors,
+      ...(theme?.colors || {}),
+      chart: theme?.colors?.chart?.length ? theme.colors.chart : sampleTheme.colors.chart,
+    },
+    typography: {
+      ...sampleTheme.typography,
+      ...(theme?.typography || {}),
+    },
+    components: {
+      ...sampleTheme.components,
+      ...(theme?.components || {}),
+      card: {
+        ...sampleTheme.components.card,
+        ...(theme?.components?.card || {}),
+      },
+    },
+  };
+}
+
+function normalizeReportForRuntime(report: ReportDefinition, fallbackTheme?: ThemeDefinition | null): ReportDefinition {
+  return {
+    ...report,
+    theme: mergeThemeWithFallback(report.theme || fallbackTheme || sampleTheme),
+  };
+}
+
+function buildReportComparisonSnapshot(report: ReportDefinition) {
+  return {
+    id: report.id,
+    name: report.name,
+    description: report.description || '',
+    generationMode: report.generationMode || '',
+    pages: report.pages,
+    defaultPage: report.defaultPage || '',
+    theme: mergeThemeWithFallback(report.theme),
+  };
+}
+
+function countChangedQueries(previousQueries: QueryDefinition[], nextQueries: QueryDefinition[]): number {
+  const previousMap = new Map(previousQueries.map((query) => [query.id, JSON.stringify(query)]));
+  const nextMap = new Map(nextQueries.map((query) => [query.id, JSON.stringify(query)]));
+  const ids = new Set([...previousMap.keys(), ...nextMap.keys()]);
+  let changed = 0;
+
+  ids.forEach((id) => {
+    if (previousMap.get(id) !== nextMap.get(id)) {
+      changed += 1;
+    }
+  });
+
+  return changed;
+}
+
+function countChangedComponents(previousPages: PageDefinition[], nextPages: PageDefinition[]): number {
+  const previousMap = new Map(
+    previousPages.flatMap((page) => page.components.map((component) => [`${page.id}/${component.id}`, JSON.stringify(component)] as const))
+  );
+  const nextMap = new Map(
+    nextPages.flatMap((page) => page.components.map((component) => [`${page.id}/${component.id}`, JSON.stringify(component)] as const))
+  );
+  const ids = new Set([...previousMap.keys(), ...nextMap.keys()]);
+  let changed = 0;
+
+  ids.forEach((id) => {
+    if (previousMap.get(id) !== nextMap.get(id)) {
+      changed += 1;
+    }
+  });
+
+  return changed;
+}
+
+function isDarkTheme(theme: ThemeDefinition): boolean {
+  const background = theme.colors.background || '';
+  const normalized = background.replace('#', '');
+  if (normalized.length !== 6) {
+    return false;
+  }
+
+  const red = parseInt(normalized.slice(0, 2), 16);
+  const green = parseInt(normalized.slice(2, 4), 16);
+  const blue = parseInt(normalized.slice(4, 6), 16);
+  const luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue);
+  return luminance < 150;
+}
+
+function summarizeAppliedChanges(
+  previousReport: ReportDefinition,
+  previousPages: PageDefinition[],
+  previousQueries: QueryDefinition[],
+  nextReport: ReportDefinition,
+  nextPages: PageDefinition[],
+  nextQueries: QueryDefinition[],
+  userIntent: string,
+  aiMessage?: string
+): string {
+  const previousTheme = mergeThemeWithFallback(previousReport.theme);
+  const nextTheme = mergeThemeWithFallback(nextReport.theme);
+  const nextThemeName = nextTheme.name?.trim();
+  const themeChanged = JSON.stringify(previousTheme) !== JSON.stringify(nextTheme);
+  const reportChanged = JSON.stringify(buildReportComparisonSnapshot(previousReport)) !== JSON.stringify(buildReportComparisonSnapshot(nextReport));
+  const changedQueries = countChangedQueries(previousQueries, nextQueries);
+  const changedComponents = countChangedComponents(previousPages, nextPages);
+  const parts: string[] = [];
+
+  if (themeChanged) {
+    if (nextThemeName && nextThemeName.toLowerCase().includes('dracula')) {
+      parts.push('已切换为 Dracula 主题');
+    } else {
+      parts.push(isDarkTheme(nextTheme) ? '已切换为深色报表主题' : '已更新报表主题');
+    }
+  }
+
+  if (changedComponents > 0) {
+    parts.push(`已调整 ${changedComponents} 个组件的布局或样式`);
+  }
+
+  if (changedQueries > 0) {
+    parts.push(`已同步更新 ${changedQueries} 条查询或字段映射`);
+  }
+
+  if (!themeChanged && /深色|浅色|配色|颜色|主题/.test(userIntent) && changedComponents > 0) {
+    parts.push('当前主要变更落在图表或组件样式，整份报表主题未切换');
+  }
+
+  if (!themeChanged && /dracula/i.test(userIntent)) {
+    parts.push('当前报表主题名称仍未切换到 Dracula');
+  }
+
+  if (!parts.length && reportChanged) {
+    parts.push('已应用报表级修改');
+  }
+
+  if (!parts.length && aiMessage?.trim()) {
+    return aiMessage.trim();
+  }
+
+  return `${parts.join('，')}。`;
+}
 
 async function* readSseDataLines(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<string> {
   const decoder = new TextDecoder();
@@ -89,6 +310,8 @@ async function* readSseDataLines(reader: ReadableStreamDefaultReader<Uint8Array>
   }
 }
 
+type PersistedAiComposerMode = 'generate-model' | 'generate-asset' | 'refine';
+
 type QueryRow = Record<string, unknown>;
 type RibbonTabId = 'home' | 'dataset' | 'ai' | 'view';
 type WorkspaceRailId = WorkspaceMode;
@@ -115,6 +338,10 @@ type RawAiProgressPayload = AiProgressPayload & {
   Report?: ReportDefinition;
   Pages?: PageDefinition[];
   Queries?: QueryDefinition[];
+};
+type ComposePromptResponse = {
+  prompt?: string;
+  Prompt?: string;
 };
 
 const defaultGenerationPrompt = '请自动设计一份美观、专业、具有清晰信息层级的 Power BI 风格报表。';
@@ -151,6 +378,17 @@ function parseAiProgressPayload(json: string): AiProgressPayload | null {
   } catch {
     return null;
   }
+}
+
+function parseComposePromptResponse(json: string): string {
+  const payload = JSON.parse(json) as ComposePromptResponse;
+  const prompt = typeof payload.prompt === 'string'
+    ? payload.prompt
+    : typeof payload.Prompt === 'string'
+      ? payload.Prompt
+      : '';
+
+  return prompt.trim();
 }
 
 function quoteDaxString(value: string): string {
@@ -247,6 +485,51 @@ function createGradientIcon(
       />
       <span style={{ transform: 'translateY(1px)' }}>
         <ShellIcon name={icon} size={Math.round(size * 0.62)} />
+      </span>
+    </span>
+  );
+}
+
+function createDoubleChevronIcon(
+  direction: 'left' | 'right' | 'up' | 'down',
+  color = '#0F8C72',
+  size = 22,
+): React.ReactNode {
+  const iconName = direction === 'up' || direction === 'down'
+    ? (direction === 'up' ? 'chevron-up' : 'chevron-down')
+    : 'chevron-left';
+  const isHorizontal = direction === 'left' || direction === 'right';
+  const overlapOffset = Math.max(6, Math.round(size * 0.48));
+
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color,
+        flexDirection: isHorizontal ? 'row' : 'column',
+        transform: direction === 'right' ? 'rotate(180deg)' : 'none',
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-flex',
+          transform: isHorizontal ? 'translateY(1px)' : 'translateX(0.5px)',
+        }}
+      >
+        <ShellIcon name={iconName} size={Math.round(size * 0.78)} strokeWidth={2.5} />
+      </span>
+      <span
+        style={{
+          display: 'inline-flex',
+          marginLeft: isHorizontal ? -overlapOffset : 0,
+          marginTop: isHorizontal ? 0 : -overlapOffset,
+          transform: isHorizontal ? 'translateY(1px)' : 'translateX(0.5px)',
+        }}
+      >
+        <ShellIcon name={iconName} size={Math.round(size * 0.78)} strokeWidth={2.5} />
       </span>
     </span>
   );
@@ -1509,8 +1792,15 @@ export function App() {
   const [activeTab, setActiveTab] = useState<'tables' | 'measures'>('tables');
   const [showConnectDialog, setShowConnectDialog] = useState(false);
 
+  type AiComposerMode = PersistedAiComposerMode;
+  type AiGenerationMode = Exclude<AiComposerMode, 'refine'>;
+  interface ChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: string;
+  }
+
   // AI Generation state
-  const [userPrompt, setUserPrompt] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<string>('');
   const [generatedReport, setGeneratedReport] = useState<ReportDefinition | null>(null);
@@ -1558,15 +1848,19 @@ export function App() {
   const [isRibbonCollapsed, setIsRibbonCollapsed] = useState(false);
 
   // AI Dialogue state for incremental modification
-  interface ChatMessage {
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-    timestamp: string;
-  }
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
   const [isRefining, setIsRefining] = useState(false);
-  const [showChatPanel, setShowChatPanel] = useState(false);
+  const [aiComposerMode, setAiComposerMode] = useState<AiComposerMode>('generate-model');
+  const [isComposingPrompt, setIsComposingPrompt] = useState(false);
+  const [aiExecutionTraceLines, setAiExecutionTraceLines] = useState<string[]>([]);
+  const [hasHydratedAiConversation, setHasHydratedAiConversation] = useState(false);
+  const [reportCanvasZoomMode, setReportCanvasZoomMode] = useState<'fit' | 'manual'>('fit');
+  const [reportCanvasFitZoomPercent, setReportCanvasFitZoomPercent] = useState(74);
+  const [reportCanvasManualZoomPercent, setReportCanvasManualZoomPercent] = useState(100);
+  const [reportCanvasZoomInputValue, setReportCanvasZoomInputValue] = useState('100');
+  const aiConversationScrollRef = React.useRef<HTMLDivElement>(null);
+  const lastPersistedAiConversationRef = React.useRef('');
 
   useEffect(() => {
     if (!window.electronAPI?.getApiUrl) {
@@ -1581,6 +1875,10 @@ export function App() {
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err));
       });
+  }, []);
+
+  useEffect(() => {
+    setHasHydratedAiConversation(true);
   }, []);
 
   const buildModelConnectionString = () => {
@@ -3032,6 +3330,7 @@ export function App() {
         generationMode: options?.generationMode || 'imported',
         pages: [pageId],
         defaultPage: pageId,
+        theme: sampleTheme,
       },
       pages: [{
         id: pageId,
@@ -3054,14 +3353,15 @@ export function App() {
   const buildAssetDrivenPrompt = (
     datasetAssets: ImportSummaryItem[],
     draft: DatasetAssetDraft,
-    mode: 'model' | 'asset'
+    mode: 'model' | 'asset',
+    intent: string
   ): string => {
     const lines: string[] = [];
-    const intent = userPrompt.trim() || defaultGenerationPrompt;
+    const normalizedIntent = intent.trim() || defaultGenerationPrompt;
 
     lines.push('请基于当前上下文中的现有数据集素材和查询，重新设计成真正可交付的 BI 报表。');
     lines.push(`触发来源: ${mode === 'model' ? '从模型生成' : '从素材生成'}`);
-    lines.push(`用户目标: ${intent}`);
+    lines.push(`用户目标: ${normalizedIntent}`);
     lines.push('');
     lines.push('必须遵守的约束:');
     lines.push('1. 只能使用 currentContext 中已有的 queries 作为数据来源，不要新增查询，不要修改 query id。');
@@ -3141,16 +3441,15 @@ export function App() {
       ? report.defaultPage
       : normalizedPages[0]?.id;
 
-    setGeneratedReport({
+    setGeneratedReport(normalizeReportForRuntime({
       ...report,
       pages: normalizedPages.map((page) => page.id),
       defaultPage: defaultPageId,
       modifiedAt: new Date().toISOString(),
       generationMode: 'ai-generated',
-    });
+    }, sampleTheme));
     setGeneratedPages(normalizedPages);
     setGeneratedQueries(draft.queries);
-    setUserPrompt(buildReversePromptFromContext(report, normalizedPages, draft.queries));
     setImportSummary((previous) => previous.map((item) => {
       const rendered = draft.renderedSummaryMap.get(item.id);
       if (!rendered) {
@@ -3169,27 +3468,26 @@ export function App() {
     setWorkspaceMode('report');
     setShowRightPane(true);
     setGenerationProgress(completionMessage);
+    pushAiExecutionTrace(`执行完成：${completionMessage}`);
   };
 
   const generateReportWithAiFromDatasetAssets = async (
     datasetAssets: ImportSummaryItem[],
-    mode: 'model' | 'asset'
-  ) => {
+    mode: 'model' | 'asset',
+    intent: string
+  ): Promise<string> => {
     if (!apiUrl) {
-      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
-      return;
+      throw new Error('后端服务尚未就绪，请稍后再试。');
     }
 
     if (!isConnected) {
-      setGenerationProgress('请先连接模型，再使用 AI 生成。');
-      return;
+      throw new Error('请先连接模型，再使用 AI 生成。');
     }
 
     const apiKey = localStorage.getItem('vibeBiAiApiKey');
     if (!apiKey) {
-      setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
       handleOpenSettings();
-      return;
+      throw new Error('请先配置 AI API Key（点击设置按钮）');
     }
 
     const draft = buildDraftReportFromDatasetAssets(datasetAssets, {
@@ -3199,12 +3497,11 @@ export function App() {
     });
 
     if (!draft) {
-      setGenerationProgress('可见素材缺少可执行查询，无法作为 AI 设计输入。');
-      return;
+      throw new Error('可见素材缺少可执行查询，无法作为 AI 设计输入。');
     }
 
     setIsGenerating(true);
-    setGenerationProgress(`正在调用 AI 基于 ${datasetAssets.length} 个可见素材设计报表...`);
+    recordAiProgress('refining', `正在调用 AI 基于 ${datasetAssets.length} 个可见素材设计报表...`);
 
     try {
       const response = await fetch(`${apiUrl}/api/ai/refine`, {
@@ -3217,7 +3514,7 @@ export function App() {
         },
         body: JSON.stringify({
           connectionString: buildModelConnectionString(),
-          userPrompt: buildAssetDrivenPrompt(datasetAssets, draft, mode),
+          userPrompt: buildAssetDrivenPrompt(datasetAssets, draft, mode, intent),
           currentContext: {
             report: draft.report,
             pages: draft.pages,
@@ -3237,6 +3534,7 @@ export function App() {
       }
 
       let applied = false;
+      let completionMessage = `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`;
 
       for await (const json of readSseDataLines(reader)) {
         const progress = parseAiProgressPayload(json);
@@ -3244,9 +3542,7 @@ export function App() {
           continue;
         }
 
-        if (progress.message || progress.step) {
-          setGenerationProgress(progress.message || progress.step || '');
-        }
+        recordAiProgress(progress.step, progress.message);
 
         if (progress.step === 'error') {
           throw new Error(progress.message || 'AI 设计失败');
@@ -3261,8 +3557,9 @@ export function App() {
             draft,
             progress.report,
             progress.pages,
-            progress.message || `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`
+            progress.message || completionMessage
           );
+          completionMessage = progress.message || completionMessage;
           applied = true;
         }
       }
@@ -3270,32 +3567,15 @@ export function App() {
       if (!applied) {
         throw new Error('AI 未返回可用于渲染的最终报表。');
       }
+
+      return completionMessage;
     } catch (err) {
-      setGenerationProgress(`AI 设计失败: ${err instanceof Error ? err.message : String(err)}`);
+      const message = `AI 设计失败: ${err instanceof Error ? err.message : String(err)}`;
+      recordAiProgress('error', message);
+      throw new Error(message);
     } finally {
       setIsGenerating(false);
     }
-  };
-
-  const handleAiGenerateFromImport = async () => {
-    const importableVisuals = importSummary.filter((item) => (
-      item.isVisible
-      && item.hasQuery
-      && Boolean(item.fullQuery || item.executionDax)
-      && item.charts.some((chart) => chart.isVisible)
-      && item.fields.some((field) => field.isVisible)
-    ));
-    setWorkspaceMode('report');
-    setActiveRibbonTab('ai');
-    setActiveLeftPaneSection('ai');
-    setShowRightPane(true);
-
-    if (importableVisuals.length === 0) {
-      setGenerationProgress('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
-      return;
-    }
-
-    await generateReportWithAiFromDatasetAssets(importableVisuals, 'asset');
   };
 
   // Disconnect
@@ -3319,259 +3599,77 @@ export function App() {
     setWorkspaceMode('report');
     setActiveLeftPaneSection('start');
     setShowRightPane(true);
+    setGenerationProgress('');
     setChatMessages([]);
-    setShowChatPanel(false);
-  };
-
-  const buildReversePromptFromContext = (
-    report: ReportDefinition | null | undefined,
-    pages: PageDefinition[],
-    queries: QueryDefinition[]
-  ): string => {
-    if (!report || pages.length === 0) {
-      return '当前没有报表。请描述你想要创建的报表。';
-    }
-
-    const lines: string[] = [];
-    lines.push(`当前报表: ${report.name}`);
-    if (report.description) {
-      lines.push(`报表说明: ${report.description}`);
-    }
-    lines.push('');
-    lines.push('当前报表包含以下页面与组件：');
-    lines.push('');
-
-    pages.forEach((page, pageIndex) => {
-      lines.push(`${pageIndex + 1}. 页面 "${page.name}"`);
-      page.components.forEach((comp, idx) => {
-        const query = queries.find((q) => q.id === comp.queryRef);
-        lines.push(`   ${idx + 1}) "${comp.config?.title || comp.id}" - ${comp.type}`);
-        lines.push(`      位置: x=${comp.position.x}, y=${comp.position.y}, w=${comp.position.w}, h=${comp.position.h}`);
-        if (query) {
-          lines.push(`      DAX: ${query.dax.slice(0, 80)}${query.dax.length > 80 ? '...' : ''}`);
-        }
-      });
-      lines.push('');
-    });
-
-    lines.push('请描述你想要做的修改：');
-    lines.push('- "把第一个图表改成折线图"');
-    lines.push('- "添加一个KPI显示总票数"');
-    lines.push('- "交换图表A和B的位置"');
-    lines.push('- "修改配色为蓝色主题"');
-
-    return lines.join('\n');
-  };
-
-  // Generate reverse prompt from current report
-  const generateReversePrompt = (): string => buildReversePromptFromContext(currentReport, currentPages, currentQueries);
-
-  // Toggle chat panel and initialize with reverse prompt
-  const handleToggleChatPanel = () => {
-    const newState = !showChatPanel;
-    setShowChatPanel(newState);
-    if (newState && chatMessages.length === 0) {
-      // Initialize with system message containing reverse prompt
-      const reversePrompt = generateReversePrompt();
-      setChatMessages([
-        {
-          role: 'system',
-          content: reversePrompt,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-    }
-  };
-
-  const handleSendChatMessage = async () => {
-    if (!apiUrl || !isConnected || !chatInput.trim() || isRefining) return;
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      handleOpenSettings();
-      return;
-    }
-
-    const userMessage = chatInput.trim();
+    resetAiExecutionTrace();
     setChatInput('');
-    setChatMessages(prev => [...prev, {
-      role: 'user',
-      content: userMessage,
-      timestamp: new Date().toISOString(),
-    }]);
-    setIsRefining(true);
-
-    try {
-      const context = {
-        report: currentReport,
-        pages: currentPages,
-        queries: currentQueries,
-      };
-
-      const response = await fetch(`${apiUrl}/api/ai/refine`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: userMessage,
-          currentContext: context,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`优化请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let assistantMessage = '';
-
-      for await (const json of readSseDataLines(reader)) {
-        const progress = parseAiProgressPayload(json);
-        if (!progress) {
-          continue;
-        }
-
-        if (progress.step === 'complete' && progress.report) {
-          const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
-          const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
-
-          setGeneratedReport(progress.report);
-          setGeneratedPages(nextPages);
-          setGeneratedQueries(nextQueries);
-          setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
-          assistantMessage = progress.message || '报表已更新';
-        } else if (progress.step === 'error') {
-          assistantMessage = `错误: ${progress.message}`;
-        } else {
-          assistantMessage = progress.message || progress.step || assistantMessage;
-        }
-      }
-
-      setChatMessages(prev => [...prev, {
-        role: 'assistant',
-        content: assistantMessage,
-        timestamp: new Date().toISOString(),
-      }]);
-    } catch (err) {
-      setChatMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `修改失败: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: new Date().toISOString(),
-      }]);
-    } finally {
-      setIsRefining(false);
-    }
-  };
-
-  // AI Generate Report
-  const handleGenerateReport = async () => {
-    setWorkspaceMode('report');
-    setActiveRibbonTab('ai');
-    setActiveLeftPaneSection('ai');
-    setShowRightPane(true);
-
-    if (visibleDatasetAssets.length > 0) {
-      await generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'model');
-      return;
-    }
-
-    if (!apiUrl) {
-      setGenerationProgress('后端服务尚未就绪，请稍后再试。');
-      return;
-    }
-
-    if (!isConnected) {
-      setGenerationProgress('请先连接模型，再进行 AI 生成。');
-      return;
-    }
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      setGenerationProgress('请先配置 AI API Key（点击设置按钮）');
-      handleOpenSettings();
-      return;
-    }
-
-    const prompt = userPrompt.trim() || defaultGenerationPrompt;
-
-    setIsGenerating(true);
-    setGenerationProgress('开始生成报表...');
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': localStorage.getItem('vibeBiAiApiKey') || '',
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: prompt,
-          pageCount: 1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`生成请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      for await (const json of readSseDataLines(reader)) {
-        const progress = parseAiProgressPayload(json);
-        if (!progress) {
-          continue;
-        }
-
-        setGenerationProgress(progress.message || progress.step || '');
-
-        if (progress.step === 'complete' && progress.report) {
-          const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
-          const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
-
-          if (nextPages.length === 0) {
-            setGenerationProgress('AI 已完成生成，但没有返回任何报表页面。');
-            continue;
-          }
-
-          setGeneratedReport(progress.report);
-          setGeneratedPages(nextPages);
-          setGeneratedQueries(nextQueries);
-          setUserPrompt(buildReversePromptFromContext(progress.report, nextPages, nextQueries));
-          setActiveImportedComponentId(undefined);
-          setGenerationProgress(
-            progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`
-          );
-        } else if (progress.step === 'error') {
-          setGenerationProgress(`错误: ${progress.message}`);
-        }
-      }
-    } catch (err) {
-      setGenerationProgress(`生成失败: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setIsGenerating(false);
-    }
+    setAiComposerMode('generate-model');
+    setIsComposingPrompt(false);
   };
 
   // Get current report/pages/queries - return null if nothing generated/imported
   const currentReport = generatedReport;
   const currentPages = generatedPages.length > 0 ? generatedPages : [];
   const currentQueries = generatedQueries.length > 0 ? generatedQueries : [];
+  const currentTheme = React.useMemo(
+    () => mergeThemeWithFallback(currentReport?.theme),
+    [currentReport]
+  );
+  const aiConversationPersistencePayload = React.useMemo(() => ({
+    version: 1,
+    chatMessages: chatMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+    })),
+    chatInput,
+    aiComposerMode,
+    generationProgress,
+    context: {
+      workspaceMode,
+      connectionTarget: connectionString.trim() || undefined,
+      connectionDatabase: connectionDatabase.trim() || undefined,
+      modelName: modelMetadata?.databaseName || undefined,
+      reportId: currentReport?.id || undefined,
+      reportName: currentReport?.name || undefined,
+      pageCount: currentPages.length,
+      queryCount: currentQueries.length,
+    },
+  }), [
+    aiComposerMode,
+    chatInput,
+    chatMessages,
+    connectionDatabase,
+    connectionString,
+    currentPages.length,
+    currentQueries.length,
+    currentReport,
+    generationProgress,
+    modelMetadata?.databaseName,
+    workspaceMode,
+  ]);
+
+  useEffect(() => {
+    if (!hasHydratedAiConversation || !window.electronAPI?.writeAiConversationState) {
+      return;
+    }
+
+    const fingerprint = JSON.stringify(aiConversationPersistencePayload);
+    if (lastPersistedAiConversationRef.current === fingerprint) {
+      return;
+    }
+
+    lastPersistedAiConversationRef.current = fingerprint;
+    const persistedFileContent = JSON.stringify({
+      ...aiConversationPersistencePayload,
+      savedAt: new Date().toISOString(),
+    }, null, 2);
+
+    window.electronAPI.writeAiConversationState(persistedFileContent).catch((err) => {
+      console.warn('[AI Conversation] Failed to persist session:', err);
+    });
+  }, [aiConversationPersistencePayload, hasHydratedAiConversation]);
+
   const queryBuilderMetadataGroups = React.useMemo(() => {
     const availableTables = modelMetadata?.tables ?? [];
     const measuresByTable = new Map<string, Array<{ name: string; tableName?: string }>>();
@@ -3709,6 +3807,542 @@ export function App() {
   const hasReport = Boolean(currentReport && currentPages.length > 0);
   const hasImportedVisuals = importSummary.length > 0;
   const importableVisualCount = visibleDatasetAssets.length;
+  const isAiBusy = isGenerating || isRefining || isComposingPrompt;
+  const effectiveReportCanvasZoomPercent = reportCanvasZoomMode === 'fit'
+    ? reportCanvasFitZoomPercent
+    : reportCanvasManualZoomPercent;
+
+  const appendChatMessage = (role: ChatMessage['role'], content: string) => {
+    setChatMessages((previous) => [
+      ...previous,
+      {
+        role,
+        content,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+  };
+
+  const resetAiExecutionTrace = () => {
+    setAiExecutionTraceLines([]);
+  };
+
+  const startAiExecutionTrace = (mode: AiComposerMode, intent: string) => {
+    setAiExecutionTraceLines(buildAiExecutionPlanLines(mode, intent));
+  };
+
+  const pushAiExecutionTrace = (line: string | null | undefined) => {
+    if (!line?.trim()) {
+      return;
+    }
+
+    setAiExecutionTraceLines((previous) => (
+      previous[previous.length - 1] === line
+        ? previous
+        : [...previous, line]
+    ));
+  };
+
+  const recordAiProgress = (step?: string, message?: string) => {
+    if (message || step) {
+      setGenerationProgress(message || step || '');
+    }
+
+    pushAiExecutionTrace(mapAiProgressToTraceLine(step, message));
+  };
+
+  const applyReportCanvasManualZoom = (value: number) => {
+    setReportCanvasZoomMode('manual');
+    setReportCanvasManualZoomPercent(clampReportCanvasZoom(value));
+  };
+
+  const commitReportCanvasZoomInput = () => {
+    const parsed = Number(reportCanvasZoomInputValue.replace('%', '').trim());
+    if (Number.isNaN(parsed)) {
+      setReportCanvasZoomInputValue(String(effectiveReportCanvasZoomPercent));
+      return;
+    }
+
+    applyReportCanvasManualZoom(parsed);
+  };
+
+  useEffect(() => {
+    setReportCanvasZoomInputValue(String(effectiveReportCanvasZoomPercent));
+  }, [effectiveReportCanvasZoomPercent]);
+
+  useEffect(() => {
+    const scrollContainer = aiConversationScrollRef.current;
+    if (!scrollContainer) {
+      return undefined;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      scrollContainer.scrollTo({
+        top: scrollContainer.scrollHeight,
+        behavior: 'smooth',
+      });
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [aiExecutionTraceLines, chatMessages, generationProgress]);
+
+  const openAiWorkspace = () => {
+    setWorkspaceMode('report');
+    setActiveRibbonTab('ai');
+    setActiveLeftPaneSection('ai');
+    setShowRightPane(true);
+  };
+
+  const buildAiContextHint = (mode: AiGenerationMode) => {
+    const assetNames = visibleDatasetAssets
+      .slice(0, 5)
+      .map((item) => item.name)
+      .filter(Boolean);
+
+    const lines: string[] = [];
+    if (modelMetadata?.databaseName) {
+      lines.push(`模型名称: ${modelMetadata.databaseName}`);
+    }
+
+    if (mode === 'generate-asset') {
+      lines.push(`当前可见素材数: ${visibleDatasetAssets.length}`);
+      if (assetNames.length > 0) {
+        lines.push(`优先素材: ${assetNames.join('、')}`);
+      }
+    } else if (visibleDatasetAssets.length > 0) {
+      lines.push(`当前已有 ${visibleDatasetAssets.length} 个可见素材，可作为首版布局参考。`);
+    }
+
+    return lines.join('\n');
+  };
+
+  const buildModelGenerationStarterPrompt = () => {
+    const contextHint = buildAiContextHint('generate-model');
+    const lines: string[] = [
+      '请基于当前数据模型生成一份可直接展示的 BI 报表。',
+      '先主动完成一轮规划：明确主结论、核心指标、趋势关系、结构对比和异常提醒，再输出最终版式。',
+      '整体采用浅色、编辑式、具有设计感的视觉语言，强调主副层级、留白、节奏和叙事推进。',
+      '不要做成模板化平铺界面，要更像真正可交付的经营分析封面页或管理汇报页。',
+    ];
+
+    if (contextHint) {
+      lines.push(contextHint);
+    }
+
+    lines.push('');
+    lines.push('请优先组织出主视觉结论区、KPI 区、趋势区、结构对比区和异常提示区，并拉开体量差异。');
+    lines.push('标题和说明文案要像真实交付稿，不要使用空泛占位标题。');
+    lines.push('至少做出一个更有存在感的主视觉区块，不要所有卡片一样大。');
+    lines.push('生成完成前请自检主题、图表类型、字段映射、标题语义和布局是否匹配。');
+    lines.push('如果你认为还缺少关键偏好，请在结果 message 中给出后续可继续 уточ细的方向。');
+    lines.push('避免深色背景、避免平均分栏、避免紫色主导配色、避免把筛选器作为独立网格组件生成。');
+
+    return lines.join('\n');
+  };
+
+  const buildAssetGenerationStarterPrompt = () => {
+    const contextHint = buildAiContextHint('generate-asset');
+    const names = visibleDatasetAssets.slice(0, 4).map((item) => item.name).filter(Boolean);
+    const lines: string[] = [
+      '请基于当前可见素材生成一份最终可交付的 BI 报表。',
+      '先主动完成一轮规划，提炼最值得放大的主视觉结论，再安排辅助趋势、结构和明细。',
+      '不要只是把素材简单拼上去，而要重新组织成有主视觉、有层级、有呼吸感的页面。',
+      '整体采用浅色、编辑式、具有设计感的视觉语言，并保留关键素材的业务信息。',
+    ];
+
+    if (contextHint) {
+      lines.push(contextHint);
+    }
+
+    if (names.length > 0) {
+      lines.push(`当前最值得优先组织的素材: ${names.join('、')}。`);
+    }
+
+    lines.push('');
+    lines.push('尽量保留全部高价值素材，但可以重排大小、位置、图表类型和标题。');
+    lines.push('先形成结论，再展开趋势、结构和明细，避免平均分栏和平庸标题。');
+    lines.push('至少做出一个大体量的主区块和一个辅助信息带。');
+    lines.push('生成完成前请自检主题、图表类型、标题语义和组件层级是否真正落地。');
+    lines.push('避免深色背景、避免紫色主导配色、避免把筛选器作为独立网格组件生成。');
+
+    return lines.join('\n');
+  };
+
+  const buildRefinementStarterPrompt = () => {
+    if (!hasReport || !currentReport) {
+      return buildModelGenerationStarterPrompt();
+    }
+
+    return [
+      `请继续优化当前报表《${currentReport.name}》。`,
+      '先分析当前页面结构，再决定应该调整主题、图表类型、布局还是标题文案，并持续自检直到结果真实落地。',
+      '优先改进布局、图表类型、标题文案、浅色视觉层次和重点信息表达，不要脱离现有数据上下文。',
+      '避免平均分栏和平庸标题，优先增强视觉主次、留白和结论表达。',
+    ].join('\n');
+  };
+  const buildDefaultGenerationIntent = (mode: AiGenerationMode) => (
+    mode === 'generate-asset'
+      ? buildAssetGenerationStarterPrompt()
+      : buildModelGenerationStarterPrompt()
+  );
+
+  const openAiGenerationWorkspace = (mode: AiGenerationMode) => {
+    openAiWorkspace();
+    setAiComposerMode(mode);
+    setGenerationProgress('');
+    resetAiExecutionTrace();
+    if (chatMessages.length === 0) {
+      setChatInput('');
+    }
+  };
+
+  const prepareAiComposer = (mode: AiComposerMode, presetPrompt: string) => {
+    openAiWorkspace();
+    setAiComposerMode(mode);
+    setChatInput(presetPrompt);
+    resetAiExecutionTrace();
+    setGenerationProgress(
+      mode === 'refine'
+        ? '已填入一条修改建议，可继续编辑后发送。'
+        : '已填入一条提示词，可继续编辑后发送。'
+    );
+  };
+
+  const composePromptWithAi = async (mode: AiGenerationMode): Promise<string> => {
+    if (!apiUrl) {
+      throw new Error('后端服务尚未就绪，请稍后再试。');
+    }
+
+    if (!isConnected) {
+      throw new Error('请先连接模型，再生成提示词。');
+    }
+
+    if (mode === 'generate-asset' && visibleDatasetAssets.length === 0) {
+      throw new Error('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
+    }
+
+    const apiKey = localStorage.getItem('vibeBiAiApiKey');
+    if (!apiKey) {
+      handleOpenSettings();
+      throw new Error('请先配置 AI API Key（点击设置按钮）');
+    }
+
+    setIsComposingPrompt(true);
+    startAiExecutionTrace(
+      mode,
+      mode === 'generate-asset'
+        ? '基于当前可见素材整理一条首轮提示词。'
+        : '基于当前数据模型整理一条首轮提示词。'
+    );
+    recordAiProgress('building_prompt', 'AI 正在整理首轮提示词...');
+
+    try {
+      const response = await fetch(`${apiUrl}/api/ai/compose-prompt`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
+          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
+        },
+        body: JSON.stringify({
+          connectionString: buildModelConnectionString(),
+          mode,
+          userIntent: mode === 'generate-asset'
+            ? '基于当前可见素材，整理一条高质量的报表生成提示词。'
+            : '基于当前数据模型，整理一条高质量的报表生成提示词。',
+          assets: visibleDatasetAssets.slice(0, 10).map((item) => ({
+            name: item.name,
+            chartType: item.charts.find((chart) => chart.isVisible)?.chartType || item.charts[0]?.chartType || item.type,
+            rowCount: item.rowCount,
+            score: item.score,
+            visibleFields: item.fields.filter((field) => field.isVisible).map((field) => field.name),
+          })),
+          currentContext: hasReport && currentReport
+            ? {
+              report: currentReport,
+              pages: currentPages,
+              queries: currentQueries,
+            }
+            : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `生成提示词失败: ${response.statusText}`);
+      }
+
+      const prompt = parseComposePromptResponse(await response.text());
+      if (!prompt) {
+        throw new Error('AI 未返回可编辑的提示词。');
+      }
+
+      setAiComposerMode(mode);
+      setChatInput(prompt);
+      recordAiProgress('complete', 'AI 已生成首轮提示词，可继续编辑后发送。');
+      return prompt;
+    } catch (err) {
+      const message = `生成提示词失败: ${err instanceof Error ? err.message : String(err)}`;
+      recordAiProgress('error', message);
+      throw new Error(message);
+    } finally {
+      setIsComposingPrompt(false);
+    }
+  };
+
+  const generateReportFromModelWithAi = async (intent: string): Promise<string> => {
+    if (!apiUrl) {
+      throw new Error('后端服务尚未就绪，请稍后再试。');
+    }
+
+    if (!isConnected) {
+      throw new Error('请先连接模型，再进行 AI 生成。');
+    }
+
+    const apiKey = localStorage.getItem('vibeBiAiApiKey');
+    if (!apiKey) {
+      handleOpenSettings();
+      throw new Error('请先配置 AI API Key（点击设置按钮）');
+    }
+
+    const prompt = intent.trim() || defaultGenerationPrompt;
+
+    setIsGenerating(true);
+    recordAiProgress('generating', '开始生成报表...');
+
+    try {
+      const response = await fetch(`${apiUrl}/api/ai/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
+          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
+        },
+        body: JSON.stringify({
+          connectionString: buildModelConnectionString(),
+          userPrompt: prompt,
+          pageCount: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`生成请求失败: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('无法读取响应流');
+      }
+
+      let applied = false;
+      let completionMessage = '报表已生成。';
+
+      for await (const json of readSseDataLines(reader)) {
+        const progress = parseAiProgressPayload(json);
+        if (!progress) {
+          continue;
+        }
+
+        recordAiProgress(progress.step, progress.message);
+
+        if (progress.step === 'error') {
+          throw new Error(progress.message || 'AI 生成失败');
+        }
+
+        if (progress.step === 'complete' && progress.report) {
+          const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
+          const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
+          const nextReport = normalizeReportForRuntime(progress.report, sampleTheme);
+
+          if (nextPages.length === 0) {
+            throw new Error('AI 已完成生成，但没有返回任何报表页面。');
+          }
+
+          setGeneratedReport(nextReport);
+          setGeneratedPages(nextPages);
+          setGeneratedQueries(nextQueries);
+          setActiveImportedComponentId(undefined);
+          completionMessage = progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`;
+          recordAiProgress('complete', completionMessage);
+          applied = true;
+        }
+      }
+
+      if (!applied) {
+        throw new Error('AI 未返回可用于渲染的最终报表。');
+      }
+
+      return completionMessage;
+    } catch (err) {
+      const message = `生成失败: ${err instanceof Error ? err.message : String(err)}`;
+      recordAiProgress('error', message);
+      throw new Error(message);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const refineReportWithAi = async (intent: string): Promise<string> => {
+    if (!apiUrl) {
+      throw new Error('后端服务尚未就绪，请稍后再试。');
+    }
+
+    if (!isConnected) {
+      throw new Error('请先连接模型，再进行 AI 修改。');
+    }
+
+    if (!currentReport || currentPages.length === 0) {
+      throw new Error('当前还没有可修改的报表，请先发送首轮生成请求。');
+    }
+
+    const apiKey = localStorage.getItem('vibeBiAiApiKey');
+    if (!apiKey) {
+      handleOpenSettings();
+      throw new Error('请先配置 AI API Key（点击设置按钮）');
+    }
+
+    setIsRefining(true);
+    recordAiProgress('refining', '正在应用 AI 修改...');
+
+    try {
+      const response = await fetch(`${apiUrl}/api/ai/refine`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
+          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
+        },
+        body: JSON.stringify({
+          connectionString: buildModelConnectionString(),
+          userPrompt: intent,
+          currentContext: {
+            report: currentReport,
+            pages: currentPages,
+            queries: currentQueries,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`优化请求失败: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('无法读取响应流');
+      }
+
+      let applied = false;
+      let completionMessage = '报表已更新。';
+
+      for await (const json of readSseDataLines(reader)) {
+        const progress = parseAiProgressPayload(json);
+        if (!progress) {
+          continue;
+        }
+
+        recordAiProgress(progress.step, progress.message);
+
+        if (progress.step === 'error') {
+          throw new Error(progress.message || 'AI 修改失败');
+        }
+
+        if (progress.step === 'complete' && progress.report) {
+          const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
+          const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
+          const nextReport = normalizeReportForRuntime(progress.report, currentTheme);
+          const actualMessage = summarizeAppliedChanges(
+            currentReport,
+            currentPages,
+            currentQueries,
+            nextReport,
+            nextPages,
+            nextQueries,
+            intent,
+            progress.message
+          );
+
+          setGeneratedReport(nextReport);
+          setGeneratedPages(nextPages);
+          setGeneratedQueries(nextQueries);
+          completionMessage = actualMessage;
+          recordAiProgress('complete', completionMessage);
+          applied = true;
+        }
+      }
+
+      if (!applied) {
+        throw new Error('AI 未返回更新后的报表。');
+      }
+
+      return completionMessage;
+    } catch (err) {
+      const message = `修改失败: ${err instanceof Error ? err.message : String(err)}`;
+      recordAiProgress('error', message);
+      throw new Error(message);
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
+  const runAiGenerationRequest = async (mode: AiGenerationMode, intent: string): Promise<string> => {
+    if (mode === 'generate-asset') {
+      if (visibleDatasetAssets.length === 0) {
+        throw new Error('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
+      }
+
+      return generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'asset', intent);
+    }
+
+    return visibleDatasetAssets.length > 0
+      ? generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'model', intent)
+      : generateReportFromModelWithAi(intent);
+  };
+
+  const submitAiConversationTurn = async (
+    intent: string,
+    options?: {
+      mode?: AiComposerMode;
+      displayContent?: string;
+    }
+  ) => {
+    const trimmedIntent = intent.trim();
+    if (!trimmedIntent || isAiBusy) {
+      return;
+    }
+
+    const hasCurrentReport = Boolean(currentReport && currentPages.length > 0);
+    const requestedMode = options?.mode
+      || (!hasCurrentReport && aiComposerMode === 'refine' ? 'generate-model' : aiComposerMode);
+    const displayContent = options?.displayContent?.trim() || trimmedIntent;
+
+    appendChatMessage('user', displayContent);
+    startAiExecutionTrace(requestedMode, trimmedIntent);
+
+    try {
+      const assistantMessage = requestedMode === 'refine'
+        ? await refineReportWithAi(trimmedIntent)
+        : await runAiGenerationRequest(requestedMode, trimmedIntent);
+
+      setAiComposerMode('refine');
+      appendChatMessage('assistant', assistantMessage);
+    } catch (err) {
+      appendChatMessage('assistant', err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleSendChatMessage = async () => {
+    if (!chatInput.trim() || isAiBusy) {
+      return;
+    }
+
+    const userMessage = chatInput.trim();
+    setChatInput('');
+    await submitAiConversationTurn(userMessage);
+  };
   const ribbonTabs: Array<{ id: RibbonTabId; label: string; color: string }> = [
     { id: 'home', label: '主页', color: '#22C983' },
     { id: 'dataset', label: '数据集', color: '#3B82F6' },
@@ -3726,6 +4360,7 @@ export function App() {
     { id: 'model', label: '模型', color: '#F59E0B' },
   ];
   const activeInspectorMeta = inspectorSections.find((item) => item.id === activeLeftPaneSection) || inspectorSections[0];
+  const collapsedRightPaneTitle = activeLeftPaneSection === 'ai' ? 'AI 对话' : activeInspectorMeta.label;
   const showReportRightPane = workspaceMode === 'report' && showRightPane;
   const datasetPreviewPane = (() => {
     if (!selectedDataset) {
@@ -3825,54 +4460,6 @@ export function App() {
       );
     }
 
-    const previewChartType: ChartType = selectedDatasetChart.chartType === 'pie'
-      ? 'pie'
-      : selectedDatasetChart.chartType === 'line'
-        ? 'line'
-        : selectedDatasetChart.chartType === 'area'
-          ? 'area'
-          : selectedDatasetChart.chartType === 'scatter'
-            ? 'scatter'
-            : 'bar';
-    const previewReport: ReportDefinition = {
-      formatVersion: '1.0.0',
-      id: `preview-report-${selectedDataset.id}`,
-      name: `${selectedDataset.name} 预览`,
-      createdAt: new Date().toISOString(),
-      modifiedAt: new Date().toISOString(),
-      generationMode: 'manual',
-      pages: [`preview-page-${selectedDataset.id}`],
-      defaultPage: `preview-page-${selectedDataset.id}`,
-    };
-    const previewPage: PageDefinition = {
-      id: `preview-page-${selectedDataset.id}`,
-      name: '预览',
-      layout: {
-        type: 'grid',
-        columns: 12,
-        rowHeight: 48,
-        gap: 12,
-        padding: 16,
-      },
-      filters: [],
-      components: [{
-        id: `preview-component-${selectedDataset.id}`,
-        type: selectedDatasetChart.componentType,
-        position: { x: 0, y: 0, w: 12, h: selectedDatasetChart.componentType === 'kpi-card' ? 3 : 7 },
-        queryRef: selectedDatasetPreviewQueryId!,
-        config: buildComponentConfig(selectedDatasetChart.componentType, previewChartType, selectedDataset.name, selectedDatasetPreviewResult),
-      }],
-    };
-    const previewQuery: QueryDefinition = {
-      id: selectedDatasetPreviewQueryId!,
-      name: selectedDataset.name,
-      dax: selectedDataset.executionDax || selectedDataset.fullQuery || 'EVALUATE ROW("Value", BLANK())',
-      executionDax: selectedDataset.executionDax || selectedDataset.fullQuery || 'EVALUATE ROW("Value", BLANK())',
-      evaluateQueries: selectedDataset.evaluateQueries,
-      selectedEvaluateIndex: selectedDataset.selectedEvaluateIndex,
-      parameters: [],
-    };
-
     return (
       <div style={{ display: 'grid', gap: 12 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -3919,20 +4506,18 @@ export function App() {
         <div
           style={{
             minHeight: 340,
-            borderRadius: 14,
+            borderRadius: 12,
             border: `1px solid ${shellPalette.border}`,
-            background: shellPalette.canvasBg,
-            overflow: 'hidden',
-            boxShadow: shellPalette.shadow,
+            background: '#FFFFFF',
+            overflow: 'auto',
+            padding: 12,
+            boxSizing: 'border-box',
           }}
         >
-          <ReportRenderer
-            report={previewReport}
-            pages={[previewPage]}
-            queries={[previewQuery]}
-            theme={sampleTheme}
-            dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
-            apiBaseUrl={apiUrl}
+          <BasicDatasetPreview
+            datasetName={selectedDataset.name}
+            chartType={selectedDatasetChart.chartType}
+            result={selectedDatasetPreviewResult}
           />
         </div>
       </div>
@@ -4127,468 +4712,732 @@ export function App() {
       )}
     </div>
   );
-  const collapseChromeButtonStyle: React.CSSProperties = {
-    width: 20,
-    height: 20,
-    borderRadius: 3,
-    border: '1px solid transparent',
+  const aiPaneToggleButtonStyle: React.CSSProperties = {
+    width: 28,
+    height: 28,
+    border: 'none',
     background: 'transparent',
-    color: shellPalette.textSubtle,
-    fontSize: 12,
-    lineHeight: 1,
+    color: shellPalette.accent,
     cursor: 'pointer',
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 0,
+    flexShrink: 0,
   };
+  const ribbonToggleButtonStyle: React.CSSProperties = {
+    width: 30,
+    height: 30,
+    border: 'none',
+    background: 'transparent',
+    color: shellPalette.accent,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 0,
+    flexShrink: 0,
+  };
+  const reportCanvasControlButtonStyle = (active = false): React.CSSProperties => ({
+    height: 30,
+    padding: '0 10px',
+    borderRadius: 8,
+    border: `1px solid ${active ? shellPalette.accentBorder : shellPalette.border}`,
+    background: active ? shellPalette.accentSoft : '#FFFFFF',
+    color: active ? shellPalette.accent : shellPalette.text,
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: 'pointer',
+  });
+  const reportCanvasHeaderActions = hasReport ? (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      <InfoPill label="画布" value={`${DEFAULT_REPORT_CANVAS_WIDTH} × ${DEFAULT_REPORT_CANVAS_HEIGHT}`} />
+      <button
+        type="button"
+        onClick={() => setReportCanvasZoomMode('fit')}
+        style={reportCanvasControlButtonStyle(reportCanvasZoomMode === 'fit')}
+      >
+        宽度自适应
+      </button>
+      <button
+        type="button"
+        onClick={() => applyReportCanvasManualZoom(effectiveReportCanvasZoomPercent - 10)}
+        style={{ ...reportCanvasControlButtonStyle(), width: 30, padding: 0 }}
+      >
+        -
+      </button>
+      <input
+        type="number"
+        value={reportCanvasZoomInputValue}
+        onChange={(event) => setReportCanvasZoomInputValue(event.target.value)}
+        onBlur={commitReportCanvasZoomInput}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            commitReportCanvasZoomInput();
+          }
+        }}
+        style={{
+          width: 68,
+          height: 30,
+          padding: '0 8px',
+          borderRadius: 8,
+          border: `1px solid ${shellPalette.border}`,
+          background: '#FFFFFF',
+          color: shellPalette.text,
+          fontSize: 12,
+          fontWeight: 700,
+          boxSizing: 'border-box',
+        }}
+      />
+      <span style={{ color: shellPalette.textMuted, fontSize: 12, fontWeight: 700 }}>%</span>
+      <button
+        type="button"
+        onClick={() => applyReportCanvasManualZoom(effectiveReportCanvasZoomPercent + 10)}
+        style={{ ...reportCanvasControlButtonStyle(), width: 30, padding: 0 }}
+      >
+        +
+      </button>
+    </div>
+  ) : undefined;
+
+  const renderRightPaneShell = (
+    title: string,
+    body: React.ReactNode,
+    options?: {
+      bodyPadding?: number;
+      bodyScrollable?: boolean;
+      bodyStyle?: React.CSSProperties;
+    }
+  ) => (
+    <RightPaneSurface>
+      <div
+        style={{
+          height: '100%',
+          minHeight: 0,
+          display: 'grid',
+          gridTemplateRows: '52px minmax(0, 1fr)',
+          gap: 10,
+          padding: '8px 10px 10px',
+          boxSizing: 'border-box',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'flex-start',
+            alignItems: 'center',
+            gap: 8,
+            minHeight: 0,
+            padding: '0 2px',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setShowRightPane(false)}
+            title={`收起 ${title}`}
+            aria-label={`收起 ${title}`}
+            style={aiPaneToggleButtonStyle}
+          >
+            {createDoubleChevronIcon('right', shellPalette.accent, 18)}
+          </button>
+          <div style={{ color: shellPalette.text, fontSize: 15, fontWeight: 700 }}>
+            {title}
+          </div>
+        </div>
+        <div
+          style={{
+            minHeight: 0,
+            overflow: 'hidden',
+            borderRadius: 10,
+            border: `1px solid ${shellPalette.border}`,
+            background: '#FFFFFF',
+          }}
+        >
+          <div
+            style={{
+              height: '100%',
+              minHeight: 0,
+              overflow: options?.bodyScrollable === false ? 'hidden' : 'auto',
+              padding: options?.bodyPadding ?? 12,
+              boxSizing: 'border-box',
+              ...options?.bodyStyle,
+            }}
+          >
+            {body}
+          </div>
+        </div>
+      </div>
+    </RightPaneSurface>
+  );
+
+  const handleDirectGenerateFromEmptyState = async () => {
+    const generationMode: AiGenerationMode = aiComposerMode === 'generate-asset'
+      ? 'generate-asset'
+      : 'generate-model';
+
+    await submitAiConversationTurn(buildDefaultGenerationIntent(generationMode), {
+      mode: generationMode,
+      displayContent: generationMode === 'generate-asset'
+        ? '直接基于当前可见素材生成一版报表。'
+        : '直接基于当前模型生成一版报表。',
+    });
+  };
+
+  const handleComposePromptFromEmptyState = async () => {
+    const generationMode: AiGenerationMode = aiComposerMode === 'generate-asset'
+      ? 'generate-asset'
+      : 'generate-model';
+
+    await composePromptWithAi(generationMode);
+  };
+
+  const renderAiExecutionTrace = () => (
+    aiExecutionTraceLines.length > 0 ? (
+      <div
+        style={{
+          display: 'grid',
+          gap: 8,
+          marginBottom: 10,
+          padding: '12px 12px 10px',
+          borderRadius: 12,
+          background: 'linear-gradient(180deg, #F8FAFC 0%, #EEF2FF 100%)',
+          border: '1px solid #C7D2FE',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#4338CA' }}>
+            AI 规划与执行
+          </span>
+          <span style={{ fontSize: 10, color: shellPalette.textSubtle }}>
+            {isAiBusy ? '执行中' : '已完成'}
+          </span>
+        </div>
+        <div style={{ display: 'grid', gap: 6 }}>
+          {aiExecutionTraceLines.map((line, index) => (
+            <div
+              key={`${line}-${index}`}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '16px minmax(0, 1fr)',
+                gap: 8,
+                alignItems: 'flex-start',
+                color: shellPalette.text,
+                fontSize: 12,
+                lineHeight: 1.7,
+              }}
+            >
+              <span style={{ color: '#4F46E5', fontWeight: 700 }}>
+                {index + 1}.
+              </span>
+              <span style={{ wordBreak: 'break-word' }}>{line}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    ) : null
+  );
 
   const renderRightPaneContent = () => {
     if (activeLeftPaneSection === 'import') {
-      return (
-        <PaneSurface
-          title="导入任务"
-          subtitle="导入 JSON 并检查识别结果。"
-          borderSide="left"
-          actions={(
-            <button
-              type="button"
-              onClick={() => setShowRightPane(false)}
-              title="收起设置"
-              aria-label="收起设置"
-              style={collapseChromeButtonStyle}
+      return renderRightPaneShell('导入任务', (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <PaneCard title="Performance Analyzer JSON" subtitle="解析标题、类型并补取数据。" tone="accent">
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: 10,
+                border: `1px solid ${shellPalette.border}`,
+                background: shellPalette.paneBg,
+                color: shellPalette.textMuted,
+                fontSize: 12,
+                lineHeight: 1.7,
+              }}
             >
-              <ShellIcon name="chevron-left" size={14} />
-            </button>
-          )}
+              从顶部导入 JSON，结果显示在下方。
+            </div>
+            {!isConnected ? (
+              <div style={{ marginTop: 12, color: shellPalette.warning, fontSize: 12 }}>
+                请先连接模型。
+              </div>
+            ) : null}
+            {importError ? (
+              <div style={{ marginTop: 12, color: shellPalette.error, fontSize: 12 }}>
+                {importError}
+              </div>
+            ) : null}
+          </PaneCard>
+          <PaneCard title="导入统计" subtitle="导入状态和识别结果摘要。">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+              <InfoPill label="视觉对象" value={String(importSummary.length)} tone="accent" />
+              <InfoPill label="展示型" value={String(importSummaryGroups.display.length)} tone="success" />
+              <InfoPill label="功能型" value={String(importSummaryGroups.functional.length)} />
+              <InfoPill label="装饰型" value={String(importSummaryGroups.decorative.length)} tone="warning" />
+            </div>
+            <div style={{ marginTop: 12, fontSize: 12, color: shellPalette.textMuted, lineHeight: 1.6 }}>
+              {importSummary.length > 0 ? '下方可继续查看 visual 列表。' : '当前还没有导入 visual。'}
+            </div>
+          </PaneCard>
+          <PaneCard title="后续步骤" subtitle="导入后可继续生成或查看模型。">
+            <div style={{ display: 'grid', gap: 10 }}>
+              <InfoPill label="可生成 visual" value={String(importableVisualCount)} tone={importableVisualCount > 0 ? 'success' : 'default'} />
+              <InfoPill label="模型状态" value={isConnected ? '可用' : '未连接'} tone={isConnected ? 'accent' : 'warning'} />
+            </div>
+            <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
+              生成和查看模型都在顶部入口。
+            </div>
+            {generationProgress ? (
+              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12 }}>
+                {generationProgress}
+              </div>
+            ) : null}
+          </PaneCard>
+          {renderImportSummaryList()}
+        </div>
+      ));
+    }
+
+    if (activeLeftPaneSection === 'ai') {
+      const aiPlaceholder = hasReport
+        ? '输入你想继续修改的内容，Ctrl+Enter 发送'
+        : aiComposerMode === 'generate-asset'
+          ? '输入你希望如何基于当前素材生成报表，Ctrl+Enter 发送'
+          : '输入你希望 AI 生成什么样的报表，Ctrl+Enter 发送';
+      const shouldShowGenerationActions = chatMessages.length === 0
+        && !chatInput.trim()
+        && aiComposerMode !== 'refine'
+        && !isAiBusy;
+
+      return renderRightPaneShell('AI 对话', (
+        <div
+          style={{
+            height: '100%',
+            minHeight: 0,
+            display: 'grid',
+            gridTemplateRows: 'minmax(0, 1fr) 196px',
+            gap: 10,
+          }}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <PaneCard
-              title="Performance Analyzer JSON"
-              subtitle="解析标题、类型并补取数据。"
-              tone="accent"
+          <div
+            ref={aiConversationScrollRef}
+            style={{
+              height: '100%',
+              minHeight: 0,
+              overflow: 'auto',
+              padding: 12,
+            }}
+          >
+            {renderAiExecutionTrace()}
+            {chatMessages.length === 0 ? (
+              shouldShowGenerationActions ? (
+                <div
+                  style={{
+                    height: '100%',
+                    minHeight: 220,
+                    display: 'grid',
+                    alignContent: 'center',
+                    gap: 14,
+                    padding: '0 8px',
+                  }}
+                >
+                  <div style={{ textAlign: 'center', color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.7 }}>
+                    先选择一种开始方式，再进入真正的 AI 生成流程。
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { void handleDirectGenerateFromEmptyState(); }}
+                    disabled={isAiBusy}
+                    style={{
+                      padding: '12px 16px',
+                      borderRadius: 12,
+                      border: 'none',
+                      background: isAiBusy ? '#E5E7EB' : shellPalette.accent,
+                      color: '#FFFFFF',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: isAiBusy ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    直接生成报表
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void handleComposePromptFromEmptyState(); }}
+                    disabled={isAiBusy}
+                    style={{
+                      padding: '12px 16px',
+                      borderRadius: 12,
+                      border: `1px solid ${shellPalette.accentBorder}`,
+                      background: shellPalette.accentSoft,
+                      color: shellPalette.accent,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: isAiBusy ? 'not-allowed' : 'pointer',
+                      opacity: isAiBusy ? 0.7 : 1,
+                    }}
+                  >
+                    帮我生成提示词
+                  </button>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    height: '100%',
+                    minHeight: 180,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    textAlign: 'center',
+                    color: shellPalette.textMuted,
+                    fontSize: 12,
+                    lineHeight: 1.7,
+                    padding: '0 18px',
+                  }}
+                >
+                  {chatInput.trim()
+                    ? '首轮提示词已放到下方输入框，可继续编辑后发送。'
+                    : '当前还没有对话，直接在下方输入你的要求即可。'}
+                </div>
+              )
+            ) : chatMessages.map((msg, idx) => (
+              <div
+                key={`${msg.timestamp}-${idx}`}
+                style={{
+                  display: 'grid',
+                  gap: 6,
+                  marginBottom: idx === chatMessages.length - 1 ? 0 : 10,
+                  padding: '12px',
+                  borderRadius: 12,
+                  background: msg.role === 'user'
+                    ? 'linear-gradient(180deg, #EFF6FF 0%, #DBEAFE 100%)'
+                    : 'linear-gradient(180deg, #FFF7ED 0%, #FFFBEB 100%)',
+                  border: `1px solid ${msg.role === 'user' ? '#BFDBFE' : '#FCD34D'}`,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 10,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: msg.role === 'user' ? shellPalette.accent : shellPalette.textMuted,
+                    }}
+                  >
+                    {msg.role === 'user' ? '你' : 'AI'}
+                  </span>
+                  <span style={{ fontSize: 10, color: shellPalette.textSubtle }}>
+                    {new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    color: shellPalette.text,
+                    fontSize: 12,
+                    lineHeight: 1.7,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {msg.content}
+                </div>
+                {msg.role === 'assistant' ? (
+                  <div
+                    style={{
+                      marginTop: 2,
+                      paddingTop: 8,
+                      borderTop: '1px dashed rgba(194, 65, 12, 0.22)',
+                      color: '#9A3412',
+                      fontSize: 11,
+                      lineHeight: 1.6,
+                      letterSpacing: 0.2,
+                    }}
+                  >
+                    继续告诉我想调整的布局、配色、重点指标、图表类型或筛选方式，我会沿着当前报表继续迭代。
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateRows: 'minmax(0, 1fr) auto',
+              gap: 12,
+              height: '100%',
+              borderTop: `1px solid ${shellPalette.border}`,
+              padding: '12px 12px 14px',
+              boxSizing: 'border-box',
+            }}
+          >
+            <div style={{ height: '100%', overflow: 'hidden' }}>
+              <textarea
+                value={chatInput}
+                onChange={(event) => setChatInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleSendChatMessage();
+                  }
+                }}
+                placeholder={aiPlaceholder}
+                disabled={isAiBusy}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  resize: 'none',
+                  border: `1px solid ${shellPalette.border}`,
+                  borderRadius: 10,
+                  background: '#FFFFFF',
+                  color: shellPalette.text,
+                  fontSize: 13,
+                  lineHeight: 1.7,
+                  padding: 12,
+                  boxSizing: 'border-box',
+                  outline: 'none',
+                  fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+                }}
+              />
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-end',
+                gap: 10,
+                minHeight: 40,
+              }}
             >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setChatMessages([]);
+                    setChatInput('');
+                    setGenerationProgress('');
+                    resetAiExecutionTrace();
+                  }}
+                  disabled={isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0)}
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.textMuted,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0) ? 'not-allowed' : 'pointer',
+                    opacity: isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0) ? 0.6 : 1,
+                  }}
+                >
+                  清空会话
+                </button>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setChatInput('')}
+                  disabled={isAiBusy || !chatInput}
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 10,
+                    border: `1px solid ${shellPalette.border}`,
+                    background: '#FFFFFF',
+                    color: shellPalette.textMuted,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: isAiBusy || !chatInput ? 'not-allowed' : 'pointer',
+                    opacity: isAiBusy || !chatInput ? 0.6 : 1,
+                  }}
+                >
+                  清空输入
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleSendChatMessage(); }}
+                  disabled={isAiBusy || !chatInput.trim()}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: 10,
+                    border: 'none',
+                    background: isAiBusy ? '#EDEBE9' : shellPalette.accent,
+                    color: isAiBusy ? shellPalette.textSubtle : '#FFFFFF',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: isAiBusy || !chatInput.trim() ? 'not-allowed' : 'pointer',
+                    opacity: isAiBusy || !chatInput.trim() ? 0.7 : 1,
+                  }}
+                >
+                  {isAiBusy ? '处理中...' : '发送'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ), { bodyPadding: 0, bodyScrollable: false });
+    }
+
+    if (activeLeftPaneSection === 'model') {
+      return renderRightPaneShell('模型概览', (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <PaneCard title="连接状态" subtitle="当前模型连接。" tone={isConnected ? 'success' : 'warning'}>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <InfoPill label="状态" value={isConnected ? '已连接' : '未连接'} tone={isConnected ? 'success' : 'warning'} />
+              <InfoPill label="数据库" value={modelMetadata?.databaseName || '未加载'} />
+              <InfoPill label="地址" value={getConnectionDisplayName()} />
+            </div>
+          </PaneCard>
+          <PaneCard title="模型规模" subtitle="表、度量、关系数量摘要。">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+              <InfoPill label="表" value={String(modelMetadata?.tables.length || 0)} tone="accent" />
+              <InfoPill label="度量" value={String(modelMetadata?.measures.length || 0)} tone="success" />
+              <InfoPill label="关系" value={String(modelMetadata?.relationships.length || 0)} />
+              <InfoPill label="查询" value={String(currentQueries.length)} tone="warning" />
+            </div>
+          </PaneCard>
+          <PaneCard title="字段浏览器" subtitle="按表和度量浏览。">
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <button
+                type="button"
+                onClick={() => setActiveTab('tables')}
+                style={{
+                  flex: 1,
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: activeTab === 'tables' ? shellPalette.accent : shellPalette.ribbonMutedBg,
+                  color: activeTab === 'tables' ? '#FFFFFF' : shellPalette.textMuted,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                表 ({modelMetadata?.tables.length || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('measures')}
+                style={{
+                  flex: 1,
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: activeTab === 'measures' ? shellPalette.accent : shellPalette.ribbonMutedBg,
+                  color: activeTab === 'measures' ? '#FFFFFF' : shellPalette.textMuted,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                度量 ({modelMetadata?.measures.length || 0})
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {activeTab === 'measures'
+                ? modelMetadata?.measures.map((measure, idx) => (
+                  <div
+                    key={`${measure.tableName || 'unknown'}-${measure.name}-${idx}`}
+                    style={{
+                      padding: 10,
+                      borderRadius: 8,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: shellPalette.ribbonMutedBg,
+                    }}
+                  >
+                    <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{measure.name}</div>
+                    <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
+                      {measure.tableName || '未分组'}
+                    </div>
+                  </div>
+                ))
+                : modelMetadata?.tables.map((table, idx) => (
+                  <div
+                    key={`${table.name}-${idx}`}
+                    style={{
+                      padding: 10,
+                      borderRadius: 8,
+                      border: `1px solid ${shellPalette.border}`,
+                      background: shellPalette.ribbonMutedBg,
+                    }}
+                  >
+                    <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{table.name}</div>
+                    <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
+                      {table.columns.length} 列
+                    </div>
+                  </div>
+                ))}
+              {!modelMetadata ? (
+                <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
+                  连接成功后会在这里展示表和度量。
+                </div>
+              ) : null}
+            </div>
+          </PaneCard>
+        </div>
+      ));
+    }
+
+    return renderRightPaneShell('开始', (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <PaneCard title="Power BI 连接" subtitle="当前连接状态。" tone={isConnected ? 'success' : 'default'}>
+          {!isConnected ? (
+            <>
               <div
                 style={{
                   padding: '12px 14px',
                   borderRadius: 10,
                   border: `1px solid ${shellPalette.border}`,
                   background: shellPalette.paneBg,
-                  color: shellPalette.textMuted,
-                  fontSize: 12,
-                  lineHeight: 1.7,
                 }}
               >
-                从顶部导入 JSON，结果显示在下方。
-              </div>
-              {!isConnected ? (
-                <div style={{ marginTop: 12, color: shellPalette.warning, fontSize: 12 }}>
-                  请先连接模型。
+                <div style={{ color: shellPalette.text, fontSize: 13, fontWeight: 600 }}>
+                  当前目标
                 </div>
-              ) : null}
-              {importError ? (
+                <div style={{ marginTop: 6, color: shellPalette.textMuted, fontSize: 12 }}>
+                  {getConnectionDisplayName()}
+                </div>
+                <div style={{ marginTop: 8, color: shellPalette.textSubtle, fontSize: 11 }}>
+                  从顶部入口连接。
+                </div>
+              </div>
+              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
+                连接和设置都在顶部。
+              </div>
+              {connectionError ? (
                 <div style={{ marginTop: 12, color: shellPalette.error, fontSize: 12 }}>
-                  {importError}
+                  {connectionError}
                 </div>
               ) : null}
-            </PaneCard>
-            <PaneCard title="导入统计" subtitle="导入状态和识别结果摘要。">
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
-                <InfoPill label="视觉对象" value={String(importSummary.length)} tone="accent" />
-                <InfoPill label="展示型" value={String(importSummaryGroups.display.length)} tone="success" />
-                <InfoPill label="功能型" value={String(importSummaryGroups.functional.length)} />
-                <InfoPill label="装饰型" value={String(importSummaryGroups.decorative.length)} tone="warning" />
-              </div>
-              <div style={{ marginTop: 12, fontSize: 12, color: shellPalette.textMuted, lineHeight: 1.6 }}>
-                {importSummary.length > 0
-                  ? '下方可继续查看 visual 列表。'
-                  : '当前还没有导入 visual。'}
-              </div>
-            </PaneCard>
-            <PaneCard title="后续步骤" subtitle="导入后可继续生成或查看模型。">
+            </>
+          ) : (
+            <>
               <div style={{ display: 'grid', gap: 10 }}>
-                <InfoPill label="可生成 visual" value={String(importableVisualCount)} tone={importableVisualCount > 0 ? 'success' : 'default'} />
-                <InfoPill label="模型状态" value={isConnected ? '可用' : '未连接'} tone={isConnected ? 'accent' : 'warning'} />
-              </div>
-              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                生成和查看模型都在顶部入口。
-              </div>
-              {generationProgress ? (
-                <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12 }}>
-                  {generationProgress}
-                </div>
-              ) : null}
-            </PaneCard>
-            {renderImportSummaryList()}
-          </div>
-        </PaneSurface>
-      );
-    }
-
-    if (activeLeftPaneSection === 'ai') {
-      return (
-        <PaneSurface
-          title="AI 工作区"
-          subtitle="生成报表或继续调整。"
-          borderSide="left"
-          actions={(
-            <button
-              type="button"
-              onClick={() => setShowRightPane(false)}
-              title="收起设置"
-              aria-label="收起设置"
-              style={collapseChromeButtonStyle}
-            >
-              <ShellIcon name="chevron-left" size={14} />
-            </button>
-          )}
-        >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <PaneCard
-              title="报表生成"
-              subtitle="按模型或导入结果生成报表。"
-              tone="accent"
-            >
-              <textarea
-                value={userPrompt}
-                onChange={(event) => setUserPrompt(event.target.value)}
-                placeholder="描述你想要的报表..."
-                rows={5}
-                style={{
-                  width: '100%',
-                  resize: 'vertical',
-                  minHeight: 116,
-                  borderRadius: 10,
-                  border: `1px solid ${shellPalette.border}`,
-                  background: shellPalette.paneBg,
-                  color: shellPalette.text,
-                  fontSize: 13,
-                  lineHeight: 1.6,
-                  padding: 12,
-                  boxSizing: 'border-box',
-                  fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
-                }}
-              />
-              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                在这里输入提示词，生成入口在顶部。
-              </div>
-              {generationProgress ? (
-                <div style={{ marginTop: 12, fontSize: 12, color: shellPalette.textMuted }}>
-                  {generationProgress}
-                </div>
-              ) : null}
-            </PaneCard>
-            <PaneCard title="AI 对话修改" subtitle="继续调整图表和布局。">
-              <div style={{ marginBottom: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                对话开关在顶部。
-              </div>
-              {showChatPanel ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div
-                    style={{
-                      maxHeight: 260,
-                      overflow: 'auto',
-                      borderRadius: 10,
-                      border: `1px solid ${shellPalette.border}`,
-                      background: shellPalette.ribbonMutedBg,
-                      padding: 12,
-                    }}
-                  >
-                    {chatMessages.length === 0 ? (
-                      <div style={{ color: shellPalette.textMuted, fontSize: 12, textAlign: 'center', padding: 20 }}>
-                        AI 对话记录显示在这里。
-                      </div>
-                    ) : chatMessages.map((msg, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          marginBottom: 10,
-                          padding: 10,
-                          borderRadius: 8,
-                          background: msg.role === 'user'
-                            ? '#F7FBFF'
-                            : msg.role === 'assistant'
-                              ? '#F4FBF4'
-                              : '#FAF9F8',
-                          borderLeft: `3px solid ${msg.role === 'user'
-                            ? shellPalette.accent
-                            : msg.role === 'assistant'
-                              ? shellPalette.success
-                              : shellPalette.borderStrong}`,
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            color: msg.role === 'user'
-                              ? shellPalette.accent
-                              : msg.role === 'assistant'
-                                ? shellPalette.success
-                                : shellPalette.textMuted,
-                            marginBottom: 4,
-                            textTransform: 'uppercase',
-                          }}
-                        >
-                          {msg.role === 'user' ? '你' : msg.role === 'assistant' ? 'AI' : '当前报表'}
-                        </div>
-                        <div
-                          style={{
-                            color: shellPalette.text,
-                            fontSize: 12,
-                            whiteSpace: 'pre-wrap',
-                            fontFamily: msg.role === 'system' ? 'Consolas, monospace' : 'inherit',
-                          }}
-                        >
-                          {msg.content}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      type="text"
-                      value={chatInput}
-                      onChange={(event) => setChatInput(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          handleSendChatMessage();
-                        }
-                      }}
-                      placeholder="描述你想要的修改..."
-                      disabled={isRefining}
-                      style={{
-                        flex: 1,
-                        padding: '10px 12px',
-                        borderRadius: 10,
-                        border: `1px solid ${shellPalette.border}`,
-                        background: shellPalette.paneBg,
-                        color: shellPalette.text,
-                        fontSize: 13,
-                        outline: 'none',
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSendChatMessage}
-                      disabled={isRefining || !chatInput.trim()}
-                      style={{
-                        padding: '10px 16px',
-                        borderRadius: 10,
-                        border: 'none',
-                        background: isRefining ? '#EDEBE9' : shellPalette.accent,
-                        color: isRefining ? shellPalette.textSubtle : '#FFFFFF',
-                        fontSize: 13,
-                        fontWeight: 600,
-                        cursor: isRefining || !chatInput.trim() ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      {isRefining ? '处理中...' : '发送'}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
-                  对话面板已折叠。
-                </div>
-              )}
-            </PaneCard>
-          </div>
-        </PaneSurface>
-      );
-    }
-
-    if (activeLeftPaneSection === 'model') {
-      return (
-        <PaneSurface
-          title="模型概览"
-          subtitle="查看模型和字段。"
-          borderSide="left"
-          actions={(
-            <button
-              type="button"
-              onClick={() => setShowRightPane(false)}
-              title="收起设置"
-              aria-label="收起设置"
-              style={collapseChromeButtonStyle}
-            >
-              <ShellIcon name="chevron-left" size={14} />
-            </button>
-          )}
-        >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <PaneCard title="连接状态" subtitle="当前模型连接。" tone={isConnected ? 'success' : 'warning'}>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <InfoPill label="状态" value={isConnected ? '已连接' : '未连接'} tone={isConnected ? 'success' : 'warning'} />
-                <InfoPill label="数据库" value={modelMetadata?.databaseName || '未加载'} />
+                <InfoPill label="状态" value="已连接" tone="success" />
+                <InfoPill label="数据库" value={modelMetadata?.databaseName || '未加载'} tone="accent" />
                 <InfoPill label="地址" value={getConnectionDisplayName()} />
+                <InfoPill label="表" value={String(modelMetadata?.tables.length || 0)} />
               </div>
-            </PaneCard>
-            <PaneCard title="模型规模" subtitle="表、度量、关系数量摘要。">
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
-                <InfoPill label="表" value={String(modelMetadata?.tables.length || 0)} tone="accent" />
-                <InfoPill label="度量" value={String(modelMetadata?.measures.length || 0)} tone="success" />
-                <InfoPill label="关系" value={String(modelMetadata?.relationships.length || 0)} />
-                <InfoPill label="查询" value={String(currentQueries.length)} tone="warning" />
+              <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
+                重新连接和导入都在顶部。
               </div>
-            </PaneCard>
-            <PaneCard title="字段浏览器" subtitle="按表和度量浏览。">
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('tables')}
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: activeTab === 'tables' ? shellPalette.accent : shellPalette.ribbonMutedBg,
-                    color: activeTab === 'tables' ? '#FFFFFF' : shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  表 ({modelMetadata?.tables.length || 0})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('measures')}
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: activeTab === 'measures' ? shellPalette.accent : shellPalette.ribbonMutedBg,
-                    color: activeTab === 'measures' ? '#FFFFFF' : shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  度量 ({modelMetadata?.measures.length || 0})
-                </button>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {activeTab === 'measures'
-                  ? modelMetadata?.measures.map((measure, idx) => (
-                    <div
-                      key={`${measure.tableName || 'unknown'}-${measure.name}-${idx}`}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        border: `1px solid ${shellPalette.border}`,
-                        background: shellPalette.ribbonMutedBg,
-                      }}
-                    >
-                      <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{measure.name}</div>
-                      <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {measure.tableName || '未分组'}
-                      </div>
-                    </div>
-                  ))
-                  : modelMetadata?.tables.map((table, idx) => (
-                    <div
-                      key={`${table.name}-${idx}`}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        border: `1px solid ${shellPalette.border}`,
-                        background: shellPalette.ribbonMutedBg,
-                      }}
-                    >
-                      <div style={{ color: shellPalette.text, fontSize: 12, fontWeight: 600 }}>{table.name}</div>
-                      <div style={{ marginTop: 4, color: shellPalette.textMuted, fontSize: 11 }}>
-                        {table.columns.length} 列
-                      </div>
-                    </div>
-                  ))}
-                {!modelMetadata ? (
-                  <div style={{ color: shellPalette.textMuted, fontSize: 12 }}>
-                    连接成功后会在这里展示表和度量。
-                  </div>
-                ) : null}
-              </div>
-            </PaneCard>
+            </>
+          )}
+        </PaneCard>
+        <PaneCard title="工作流" subtitle="按顺序连接、导入、生成、检查。">
+          <div style={{ display: 'grid', gap: 10 }}>
+            <InfoPill label="连接" value={isConnected ? '完成' : '待处理'} tone={isConnected ? 'success' : 'warning'} />
+            <InfoPill label="导入" value={importSummary.length > 0 ? '完成' : '待处理'} tone={importSummary.length > 0 ? 'accent' : 'default'} />
+            <InfoPill label="生成" value={hasReport ? '完成' : '待处理'} tone={hasReport ? 'success' : 'default'} />
           </div>
-        </PaneSurface>
-      );
-    }
-
-    return (
-      <PaneSurface
-        title="开始"
-        subtitle="开始当前工作流。"
-        borderSide="left"
-        actions={(
-          <button
-            type="button"
-            onClick={() => setShowRightPane(false)}
-            title="收起设置"
-            aria-label="收起设置"
-            style={collapseChromeButtonStyle}
-          >
-            <ShellIcon name="chevron-left" size={14} />
-          </button>
-        )}
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <PaneCard title="Power BI 连接" subtitle="当前连接状态。" tone={isConnected ? 'success' : 'default'}>
-            {!isConnected ? (
-              <>
-                <div
-                  style={{
-                    padding: '12px 14px',
-                    borderRadius: 10,
-                    border: `1px solid ${shellPalette.border}`,
-                    background: shellPalette.paneBg,
-                  }}
-                >
-                  <div style={{ color: shellPalette.text, fontSize: 13, fontWeight: 600 }}>
-                    当前目标
-                  </div>
-                  <div style={{ marginTop: 6, color: shellPalette.textMuted, fontSize: 12 }}>
-                    {getConnectionDisplayName()}
-                  </div>
-                  <div style={{ marginTop: 8, color: shellPalette.textSubtle, fontSize: 11 }}>
-                    从顶部入口连接。
-                  </div>
-                </div>
-                <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                  连接和设置都在顶部。
-                </div>
-                {connectionError ? (
-                  <div style={{ marginTop: 12, color: shellPalette.error, fontSize: 12 }}>
-                    {connectionError}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <div style={{ display: 'grid', gap: 10 }}>
-                  <InfoPill label="状态" value="已连接" tone="success" />
-                  <InfoPill label="数据库" value={modelMetadata?.databaseName || '未加载'} tone="accent" />
-                  <InfoPill label="地址" value={getConnectionDisplayName()} />
-                  <InfoPill label="表" value={String(modelMetadata?.tables.length || 0)} />
-                </div>
-                <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                  重新连接和导入都在顶部。
-                </div>
-              </>
-            )}
-          </PaneCard>
-          <PaneCard title="工作流" subtitle="按顺序连接、导入、生成、检查。">
-            <div style={{ display: 'grid', gap: 10 }}>
-              <InfoPill label="连接" value={isConnected ? '完成' : '待处理'} tone={isConnected ? 'success' : 'warning'} />
-              <InfoPill label="导入" value={importSummary.length > 0 ? '完成' : '待处理'} tone={importSummary.length > 0 ? 'accent' : 'default'} />
-              <InfoPill label="生成" value={hasReport ? '完成' : '待处理'} tone={hasReport ? 'success' : 'default'} />
-            </div>
-            <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-              左侧切换上下文，顶部执行命令。
-            </div>
-          </PaneCard>
-        </div>
-      </PaneSurface>
-    );
+          <div style={{ marginTop: 12, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.6 }}>
+            左侧切换上下文，顶部执行命令。
+          </div>
+        </PaneCard>
+      </div>
+    ));
   };
   const renderCollapsedRightPane = () => (
     <div
@@ -4606,8 +5455,8 @@ export function App() {
       <button
         type="button"
         onClick={() => setShowRightPane(true)}
-        title="展开设置"
-        aria-label="展开设置"
+        title={`展开 ${collapsedRightPaneTitle}`}
+        aria-label={`展开 ${collapsedRightPaneTitle}`}
         style={{
           width: '100%',
           height: '100%',
@@ -4624,12 +5473,14 @@ export function App() {
           aria-hidden="true"
           style={{
             marginTop: 14,
-            color: activeInspectorMeta.color,
+            color: shellPalette.accent,
             lineHeight: 1,
             display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
           }}
         >
-          <ShellIcon name="chevron-left" size={15} />
+          {createDoubleChevronIcon('left', shellPalette.accent, 18)}
         </span>
         <span
           aria-hidden="true"
@@ -4642,7 +5493,7 @@ export function App() {
             letterSpacing: 1.6,
           }}
         >
-          {activeInspectorMeta.label}
+          {collapsedRightPaneTitle}
         </span>
       </button>
     </div>
@@ -4689,50 +5540,53 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
               label={isGenerating ? '生成中...' : '从模型生成'}
-              description="优先基于可见素材交给 AI 设计报表，无素材时再按模型和提示词生成"
+              description="打开 AI 工作区，可直接生成或先让 AI 整理提示词"
               onClick={() => {
-                setWorkspaceMode('report');
-                setActiveLeftPaneSection('ai');
-                setShowRightPane(true);
-                void handleGenerateReport();
+                openAiGenerationWorkspace('generate-model');
               }}
-              disabled={isGenerating}
+              disabled={isAiBusy}
               tone="accent"
               showDescription={false}
             />
             <CommandButton
               icon={createGradientIcon('visual-library', '#7DD3FC', '#3B82F6')}
               label="从素材生成"
-              description="将当前可见素材库交给 AI 自动设计和排版"
-              onClick={() => { void handleAiGenerateFromImport(); }}
-              disabled={isGenerating || importableVisualCount === 0}
+              description="打开 AI 工作区，基于当前可见素材生成报表"
+              onClick={() => {
+                if (importableVisualCount === 0) {
+                  openAiWorkspace();
+                  setAiComposerMode('generate-asset');
+                  setGenerationProgress('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
+                  return;
+                }
+
+                openAiGenerationWorkspace('generate-asset');
+              }}
+              disabled={isAiBusy}
               showDescription={false}
             />
           </RibbonGroup>
           <RibbonGroup title="编辑">
             <CommandButton
               icon={createGradientIcon('refresh', '#818CF8', '#4F46E5')}
-              label="同步提示词"
-              description="根据当前报表反向生成修改提示词"
+              label="继续修改"
+              description="为当前报表预填一条修改建议，进入多轮对话"
               onClick={() => {
-                setActiveLeftPaneSection('ai');
-                setWorkspaceMode('report');
-                setUserPrompt(generateReversePrompt());
-                setShowRightPane(true);
+                prepareAiComposer('refine', buildRefinementStarterPrompt());
               }}
               showDescription={false}
             />
             <CommandButton
               icon={createGradientIcon('message', '#FDBA74', '#F97316')}
-              label={showChatPanel ? '收起对话' : '打开对话'}
-              description="对当前报表继续微调"
+              label="打开会话"
+              description="仅切换到右侧 AI 会话区，不自动发送请求"
               onClick={() => {
-                setWorkspaceMode('report');
-                setActiveLeftPaneSection('ai');
-                setShowRightPane(true);
-                handleToggleChatPanel();
+                openAiWorkspace();
+                if (!chatInput.trim()) {
+                  setAiComposerMode(hasReport ? 'refine' : 'generate-model');
+                  setChatInput(hasReport ? buildRefinementStarterPrompt() : '');
+                }
               }}
-              active={showChatPanel}
               showDescription={false}
             />
           </RibbonGroup>
@@ -4745,7 +5599,7 @@ export function App() {
         <>
           <RibbonGroup title="面板">
             <CommandButton
-              icon={createGradientIcon('chevron-left', '#34D399', '#0F8C72')}
+              icon={createDoubleChevronIcon(showReportRightPane ? 'right' : 'left', '#0F8C72', 20)}
               label={showReportRightPane ? '收起设置' : '展开设置'}
               description="折叠或展开右侧设置面板"
               onClick={() => setShowRightPane((prev) => !prev)}
@@ -4865,11 +5719,11 @@ export function App() {
   }
 
   return (
-    <div
-      style={{
-        width: '100vw',
-        height: '100vh',
-        background: shellPalette.appBg,
+      <div
+        style={{
+          width: '100vw',
+          height: '100vh',
+          background: shellPalette.appBg,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -4879,30 +5733,51 @@ export function App() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <RibbonTabs items={ribbonTabs} activeId={activeRibbonTab} onChange={handleRibbonTabChange} />
         </div>
-        <button
-          type="button"
-          onClick={() => setIsRibbonCollapsed((prev) => !prev)}
-          title={isRibbonCollapsed ? '展开功能区' : '折叠功能区'}
-          style={{
-            width: 28,
-            border: 'none',
-            borderBottom: `1px solid ${shellPalette.border}`,
-            borderLeft: `1px solid ${shellPalette.border}`,
-            background: shellPalette.ribbonMutedBg,
-            color: shellPalette.textSubtle,
-            fontSize: 10,
-            cursor: 'pointer',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <ShellIcon name={isRibbonCollapsed ? 'chevron-down' : 'chevron-up'} size={12} />
-        </button>
+        {isRibbonCollapsed ? (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              justifyContent: 'center',
+              padding: '6px 8px 0 0',
+              borderBottom: `1px solid ${shellPalette.border}`,
+              background: 'linear-gradient(180deg, #FFFDF8 0%, #F7F8FB 100%)',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setIsRibbonCollapsed(false)}
+              title="展开功能区"
+              style={ribbonToggleButtonStyle}
+            >
+              {createDoubleChevronIcon('down', shellPalette.accent, 16)}
+            </button>
+          </div>
+        ) : null}
       </div>
       {!isRibbonCollapsed ? (
         <RibbonBar>
-          {renderRibbonContent()}
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 12, minWidth: 0, flex: 1 }}>
+            {renderRibbonContent()}
+          </div>
+          <div
+            style={{
+              marginLeft: 'auto',
+              display: 'flex',
+              alignItems: 'flex-end',
+              justifyContent: 'center',
+              padding: '0 0 2px 4px',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setIsRibbonCollapsed(true)}
+              title="折叠功能区"
+              style={ribbonToggleButtonStyle}
+            >
+              {createDoubleChevronIcon('up', shellPalette.accent, 16)}
+            </button>
+          </div>
         </RibbonBar>
       ) : null}
       <WorkspaceLayout
@@ -4944,12 +5819,7 @@ export function App() {
                 subtitle={hasReport
                   ? `页面 ${currentPages.length} · 查询 ${currentQueries.length}${importSummary.length > 0 ? ` · 数据集 ${importSummary.length}` : ''}`
                   : '连接模型、进入数据视图准备素材，或直接从 AI 工作区开始生成报表。'}
-                actions={(
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    <InfoPill label="查询" value={String(currentQueries.length)} />
-                    <InfoPill label="数据集" value={String(importSummary.length)} tone={importSummary.length > 0 ? 'accent' : 'default'} />
-                  </div>
-                )}
+                actions={reportCanvasHeaderActions}
               />
               {!apiUrl ? (
                 <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: shellPalette.textMuted }}>
@@ -4963,8 +5833,7 @@ export function App() {
                     handleRibbonTabChange('ai');
                   }}
                   onOpenAi={() => {
-                    handleRibbonTabChange('ai');
-                    setShowChatPanel(true);
+                    openAiWorkspace();
                   }}
                   isConnected={isConnected}
                   hasImportedVisuals={hasImportedVisuals}
@@ -4972,27 +5841,28 @@ export function App() {
                   canOpenAi={hasReport}
                 />
               ) : (
-                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 20 }}>
-                  <div
-                    style={{
-                      minHeight: '100%',
-                      borderRadius: 14,
-                      border: `1px solid ${shellPalette.border}`,
-                      background: shellPalette.canvasBg,
-                      boxShadow: shellPalette.shadow,
-                      overflow: 'hidden',
-                    }}
+                <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 20, boxSizing: 'border-box' }}>
+                  <ReportCanvasViewport
+                    contentKey={currentReport?.id}
+                    width={DEFAULT_REPORT_CANVAS_WIDTH}
+                    height={DEFAULT_REPORT_CANVAS_HEIGHT}
+                    zoomMode={reportCanvasZoomMode}
+                    fitZoomPercent={reportCanvasFitZoomPercent}
+                    manualZoomPercent={reportCanvasManualZoomPercent}
+                    onZoomModeChange={setReportCanvasZoomMode}
+                    onFitZoomPercentChange={setReportCanvasFitZoomPercent}
+                    onManualZoomPercentChange={setReportCanvasManualZoomPercent}
                   >
                     <ReportRenderer
                       report={currentReport!}
                       pages={currentPages}
                       queries={currentQueries}
-                      theme={sampleTheme}
+                      theme={currentTheme}
                       dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
                       apiBaseUrl={apiUrl}
                       activeComponentId={activeImportedComponentId}
                     />
-                  </div>
+                  </ReportCanvasViewport>
                 </div>
               )}
             </div>

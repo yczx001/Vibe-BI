@@ -59,8 +59,8 @@ public class QueryController : ControllerBase
     {
         try
         {
-            var isValid = await _daxService.ValidateAsync(request.ConnectionString, request.Dax);
-            return Ok(new { valid = isValid });
+            var validation = await _daxService.ValidateDetailedAsync(request.ConnectionString, request.Dax);
+            return Ok(new { valid = validation.IsValid, message = validation.ErrorMessage });
         }
         catch (Exception ex)
         {

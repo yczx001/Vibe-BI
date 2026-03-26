@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { ComponentDefinition, QueryDefinition, DataSourceConfig } from '@vibe-bi/core';
+import type { ComponentDefinition, QueryDefinition, DataSourceConfig, FilterDefinition } from '@vibe-bi/core';
 import { GridItem } from './GridLayout';
 import { registry } from '../components/registry';
 import { useQueryData } from '../data/useQueryData';
@@ -8,6 +8,7 @@ export interface ComponentBridgeProps {
   component: ComponentDefinition;
   queries: QueryDefinition[];
   dataSource: DataSourceConfig;
+  pageFilters?: FilterDefinition[];
   apiBaseUrl?: string;
   isActive?: boolean;
   showInspectorActions?: boolean;
@@ -17,6 +18,7 @@ export function ComponentBridge({
   component,
   queries,
   dataSource,
+  pageFilters,
   apiBaseUrl,
   isActive = false,
   showInspectorActions = false,
@@ -48,6 +50,7 @@ export function ComponentBridge({
           queries={queries}
           dataSource={dataSource}
           renderer={renderer}
+          pageFilters={pageFilters}
           apiBaseUrl={apiBaseUrl}
           isActive={isActive}
           showInspectorActions={showInspectorActions}
@@ -62,6 +65,7 @@ interface ComponentWrapperProps {
   queries: QueryDefinition[];
   dataSource: DataSourceConfig;
   renderer: ReturnType<typeof registry.get>;
+  pageFilters?: FilterDefinition[];
   apiBaseUrl?: string;
   isActive?: boolean;
   showInspectorActions?: boolean;
@@ -74,6 +78,7 @@ function ComponentWrapper({
   queries,
   dataSource,
   renderer,
+  pageFilters,
   apiBaseUrl,
   isActive = false,
   showInspectorActions = false,
@@ -147,7 +152,22 @@ function ComponentWrapper({
   }
 
   const Comp = renderer!.component;
-  const config = { ...renderer!.defaultConfig, ...(component.config || {}) };
+  const rawConfig = { ...renderer!.defaultConfig, ...(component.config || {}) } as Record<string, unknown>;
+  const titleFallback = query?.name || component.id;
+  const normalizedConfig = component.type === 'echarts'
+    ? {
+      ...rawConfig,
+      title: typeof rawConfig.title === 'string' && rawConfig.title.trim()
+        ? rawConfig.title
+        : titleFallback,
+    }
+    : rawConfig;
+  const config = component.type === 'filter'
+    ? {
+      ...normalizedConfig,
+      definition: pageFilters?.find((filter) => filter.id === normalizedConfig.filterId),
+    }
+    : normalizedConfig;
   const rows = Array.isArray(data) ? data : [];
 
   return (

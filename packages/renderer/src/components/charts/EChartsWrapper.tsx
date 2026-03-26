@@ -2,6 +2,7 @@ import { useRef, useEffect, useMemo, type CSSProperties } from 'react';
 import * as echarts from 'echarts';
 import type { ChartConfig, ThemeDefinition } from '@vibe-bi/core';
 import { useTheme } from '../../theme/ThemeProvider';
+import { mixColors, withAlpha } from '../../theme/colorUtils';
 
 export interface EChartsWrapperProps {
   config: ChartConfig;
@@ -48,13 +49,26 @@ export function EChartsWrapper({ config, data, style }: EChartsWrapperProps) {
 
   return (
     <div
-      ref={chartRef}
       style={{
         width: '100%',
         height: '100%',
+        padding: 12,
+        boxSizing: 'border-box',
+        borderRadius: theme.components.card.borderRadius,
+        background: `linear-gradient(180deg, ${withAlpha(mixColors(theme.colors.surface, '#FFFFFF', 0.86, theme.colors.surface), 0.98)} 0%, ${withAlpha(mixColors(theme.colors.surface, theme.colors.background, 0.82, theme.colors.surface), 0.96)} 100%)`,
+        border: `1px solid ${withAlpha(theme.colors.text, 0.08)}`,
+        boxShadow: theme.components.card.shadow,
         ...style,
       }}
-    />
+    >
+      <div
+        ref={chartRef}
+        style={{
+          width: '100%',
+          height: '100%',
+        }}
+      />
+    </div>
   );
 }
 
@@ -75,12 +89,12 @@ function buildEChartsOption(
   if (config.title) {
     baseOption.title = {
       text: config.title,
-      left: 'center',
-      top: 12,
+      left: 8,
+      top: 4,
       textStyle: {
         color: theme.colors.text,
-        fontSize: 16,
-        fontWeight: 600,
+        fontSize: 14,
+        fontWeight: 700,
       },
     };
   }
@@ -89,7 +103,7 @@ function buildEChartsOption(
     baseOption.tooltip = {
       trigger: config.tooltip?.trigger || 'axis',
       backgroundColor: theme.colors.surface,
-      borderColor: 'rgba(32, 31, 30, 0.14)',
+      borderColor: withAlpha(theme.colors.text, 0.14),
       borderWidth: 1,
       textStyle: { color: theme.colors.text },
     };
@@ -98,19 +112,20 @@ function buildEChartsOption(
   if (config.legend?.show !== false) {
     baseOption.legend = {
       show: true,
-      bottom: 0,
-      textStyle: { color: theme.colors.textSecondary },
+      top: config.title ? 24 : 4,
+      left: 'left',
+      textStyle: { color: theme.colors.textSecondary, fontSize: 11 },
     };
   }
 
   switch (config.chartType) {
     case 'line':
     case 'area':
-      return buildLineOption(baseOption, config, data);
+      return buildLineOption(baseOption, config, data, theme);
     case 'bar':
-      return buildBarOption(baseOption, config, data);
+      return buildBarOption(baseOption, config, data, theme);
     case 'pie':
-      return buildPieOption(baseOption, config, data);
+      return buildPieOption(baseOption, config, data, theme);
     default:
       return baseOption;
   }
@@ -269,7 +284,8 @@ function formatFieldLabel(field: string): string {
 function buildLineOption(
   baseOption: echarts.EChartsOption,
   config: ChartConfig,
-  data: unknown[]
+  data: unknown[],
+  theme: ThemeDefinition
 ): echarts.EChartsOption {
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
@@ -298,13 +314,13 @@ function buildLineOption(
     xAxis: {
       type: config.xAxis?.type || 'category',
       data: xData as any,
-      axisLine: { lineStyle: { color: 'rgba(32, 31, 30, 0.24)' } },
-      axisLabel: { color: '#605E5C' },
+      axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
+      axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
     },
     yAxis: {
       type: 'value',
-      splitLine: { lineStyle: { color: '#E1DFDD' } },
-      axisLabel: { color: '#605E5C' },
+      splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
+      axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
     },
     series: seriesConfig.map((s) => {
       const color = (s as { color?: string }).color;
@@ -319,10 +335,10 @@ function buildLineOption(
     });
     }) as any,
     grid: {
-      left: '3%',
+      left: '4%',
       right: '4%',
       bottom: '10%',
-      top: '15%',
+      top: config.title ? 60 : 34,
       containLabel: true,
     },
   };
@@ -331,7 +347,8 @@ function buildLineOption(
 function buildBarOption(
   baseOption: echarts.EChartsOption,
   config: ChartConfig,
-  data: unknown[]
+  data: unknown[],
+  theme: ThemeDefinition
 ): echarts.EChartsOption {
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
@@ -345,6 +362,9 @@ function buildBarOption(
 
   const xField = getCategoryField(rows, allFields, valueFields, config.xAxis?.field);
   const xData = rows.map((row, index) => normalizeSeriesValue(row[xField] ?? row.__rowIndex ?? index + 1));
+  const configuredYAxis = Array.isArray(config.yAxis) ? config.yAxis[0] : undefined;
+  const isHorizontal = config.orientation === 'horizontal'
+    || (config.xAxis?.type === 'value' && configuredYAxis?.type === 'category');
 
   const seriesConfig = config.series.length > 0
     ? config.series
@@ -356,17 +376,34 @@ function buildBarOption(
 
   return {
     ...baseOption,
-    xAxis: {
-      type: config.xAxis?.type || 'category',
-      data: xData as any,
-      axisLine: { lineStyle: { color: 'rgba(32, 31, 30, 0.24)' } },
-      axisLabel: { color: '#605E5C' },
-    },
-    yAxis: {
-      type: 'value',
-      splitLine: { lineStyle: { color: '#E1DFDD' } },
-      axisLabel: { color: '#605E5C' },
-    },
+    xAxis: isHorizontal
+      ? {
+        type: 'value',
+        name: config.xAxis?.name || configuredYAxis?.name,
+        splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      }
+      : {
+        type: config.xAxis?.type || 'category',
+        data: xData as any,
+        name: config.xAxis?.name,
+        axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      },
+    yAxis: isHorizontal
+      ? {
+        type: 'category',
+        data: xData as any,
+        name: configuredYAxis?.name || config.xAxis?.name,
+        axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      }
+      : {
+        type: configuredYAxis?.type || 'value',
+        name: configuredYAxis?.name,
+        splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      },
     series: seriesConfig.map((s) => {
       const color = (s as { color?: string }).color;
       const stack = (s as { stack?: string }).stack;
@@ -380,10 +417,10 @@ function buildBarOption(
     });
     }) as any,
     grid: {
-      left: '3%',
+      left: isHorizontal ? '8%' : '4%',
       right: '4%',
       bottom: '10%',
-      top: '15%',
+      top: config.title ? 60 : 34,
       containLabel: true,
     },
   };
@@ -392,7 +429,8 @@ function buildBarOption(
 function buildPieOption(
   baseOption: echarts.EChartsOption,
   config: ChartConfig,
-  data: unknown[]
+  data: unknown[],
+  theme: ThemeDefinition
 ): echarts.EChartsOption {
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
@@ -441,7 +479,7 @@ function buildPieOption(
         avoidLabelOverlap: false,
         itemStyle: {
           borderRadius: 8,
-          borderColor: '#FFFFFF',
+          borderColor: mixColors(theme.colors.surface, theme.colors.background, 0.92, theme.colors.surface),
           borderWidth: 2,
         },
         label: {
@@ -451,9 +489,9 @@ function buildPieOption(
         emphasis: {
           label: {
             show: true,
-            fontSize: 16,
+            fontSize: 13,
             fontWeight: 'bold',
-            color: '#201F1E',
+            color: theme.colors.text,
           },
         },
         labelLine: { show: false },

@@ -9,6 +9,13 @@ public interface IDaxExecutionService
     Task<QueryResult> ExecuteAsync(string connectionString, string dax);
     Task<QueryResult> ExecuteBatchAsync(string connectionString, List<string> daxQueries);
     Task<bool> ValidateAsync(string connectionString, string dax);
+    Task<DaxValidationResult> ValidateDetailedAsync(string connectionString, string dax);
+}
+
+public record DaxValidationResult
+{
+    public required bool IsValid { get; init; }
+    public string? ErrorMessage { get; init; }
 }
 
 public class DaxExecutionService : IDaxExecutionService
@@ -152,16 +159,34 @@ public class DaxExecutionService : IDaxExecutionService
 
     public async Task<bool> ValidateAsync(string connectionString, string dax)
     {
+        var result = await ValidateDetailedAsync(connectionString, dax);
+        return result.IsValid;
+    }
+
+    public async Task<DaxValidationResult> ValidateDetailedAsync(string connectionString, string dax)
+    {
         try
         {
             var normalizedConnectionString = NormalizeConnectionString(connectionString);
             using var conn = new AdomdConnection(normalizedConnectionString);
             conn.Open();
-            return true;
+
+            using var cmd = new AdomdCommand(dax, conn);
+            using var reader = cmd.ExecuteReader();
+            _ = reader.GetSchemaTable();
+
+            return new DaxValidationResult
+            {
+                IsValid = true
+            };
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            return new DaxValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = ex.Message
+            };
         }
     }
 }

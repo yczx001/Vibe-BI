@@ -21,6 +21,9 @@ interface ElectronApi {
   readTextFile: (filePath: string) => Promise<string | null>;
   saveFile: (defaultName: string) => Promise<string | null>;
   scanPowerBiInstances: () => Promise<PowerBiScanItem[]>;
+  getAiConversationPath: () => Promise<string>;
+  readAiConversationState: () => Promise<string | null>;
+  writeAiConversationState: (content: string) => Promise<string>;
 }
 
 declare global {

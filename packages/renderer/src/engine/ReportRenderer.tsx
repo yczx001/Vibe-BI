@@ -9,6 +9,7 @@ import type {
 import { ThemeProvider } from '../theme/ThemeProvider';
 import { PageRenderer } from './PageRenderer';
 import { FilterProvider } from '../data/FilterContext';
+import { mixColors, withAlpha } from '../theme/colorUtils';
 
 export interface ReportRendererProps {
   report: ReportDefinition;
@@ -72,8 +73,10 @@ export function ReportRenderer({
     () => safePages.find((p) => p.id === currentPageId) || safePages[0],
     [safePages, currentPageId]
   );
-  const dividerColor = 'rgba(32, 31, 30, 0.12)';
-  const mutedSurface = 'rgba(243, 242, 241, 0.9)';
+  const dividerColor = withAlpha(theme.colors.text, 0.12);
+  const mutedSurface = withAlpha(mixColors(theme.colors.surface, theme.colors.background, 0.82, theme.colors.surface), 0.94);
+  const tabBarBackground = withAlpha(theme.colors.surface, 0.84);
+  const tabShadow = `0 14px 28px ${withAlpha(theme.colors.text, 0.16)}`;
 
   const pageIndex = useMemo(
     () => safePages.findIndex((p) => p.id === currentPageId),
@@ -120,7 +123,11 @@ export function ReportRenderer({
           style={{
             width: '100%',
             height: '100%',
-            backgroundColor: theme.colors.background,
+            background: `
+              radial-gradient(circle at top right, ${withAlpha(theme.colors.secondary, 0.14)}, transparent 28%),
+              radial-gradient(circle at top left, ${withAlpha(theme.colors.primary, 0.16)}, transparent 24%),
+              ${theme.colors.background}
+            `,
             color: theme.colors.text,
             fontFamily: theme.typography.fontFamily,
           }}
@@ -132,9 +139,10 @@ export function ReportRenderer({
               style={{
                 display: 'flex',
                 gap: 8,
-                padding: '12px 24px',
+                padding: '14px 24px',
                 borderBottom: `1px solid ${dividerColor}`,
-                backgroundColor: theme.colors.surface,
+                background: tabBarBackground,
+                backdropFilter: 'blur(10px)',
               }}
             >
               {safePages.map((page) => (
@@ -142,13 +150,18 @@ export function ReportRenderer({
                   key={page.id}
                   onClick={() => setCurrentPageId(page.id)}
                   style={{
-                    padding: '8px 16px',
-                    borderRadius: 6,
+                    padding: '9px 16px',
+                    borderRadius: 999,
                     border: `1px solid ${page.id === currentPageId ? theme.colors.primary : dividerColor}`,
                     cursor: 'pointer',
-                    backgroundColor: page.id === currentPageId ? theme.colors.primary : mutedSurface,
+                    background: page.id === currentPageId
+                      ? `linear-gradient(90deg, ${theme.colors.primary} 0%, ${theme.colors.secondary} 100%)`
+                      : mutedSurface,
                     color: page.id === currentPageId ? '#fff' : theme.colors.text,
-                    fontWeight: page.id === currentPageId ? 600 : 500,
+                    fontWeight: page.id === currentPageId ? 700 : 600,
+                    boxShadow: page.id === currentPageId
+                      ? tabShadow
+                      : 'none',
                   }}
                 >
                   {page.name}

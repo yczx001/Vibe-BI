@@ -2,24 +2,24 @@ import React, { createContext, useContext } from 'react';
 import type { ThemeDefinition } from '@vibe-bi/core';
 
 const defaultTheme: ThemeDefinition = {
-  name: 'Vibe Desktop Light',
+  name: 'Vibe Editorial Light',
   colors: {
-    primary: '#0F6CBD',
-    secondary: '#8764B8',
-    background: '#F3F2F1',
-    surface: '#FFFFFF',
-    text: '#201F1E',
-    textSecondary: '#605E5C',
-    chart: ['#0F6CBD', '#8764B8', '#038387', '#CA5010', '#107C10', '#B146C2'],
+    primary: '#0E7490',
+    secondary: '#C97A32',
+    background: '#F4F1EA',
+    surface: '#FCFBF8',
+    text: '#152132',
+    textSecondary: '#617082',
+    chart: ['#0E7490', '#2563EB', '#C97A32', '#7C9A4D', '#8B5E3C', '#C2410C'],
   },
   typography: {
-    fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+    fontFamily: '"Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
   },
   components: {
     card: {
-      borderRadius: 10,
-      shadow: '0 1px 2px rgba(0,0,0,0.08)',
-      padding: 18,
+      borderRadius: 22,
+      shadow: '0 18px 40px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255,255,255,0.76)',
+      padding: 22,
     },
   },
 };

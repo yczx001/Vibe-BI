@@ -13,11 +13,16 @@ public class AiController : ControllerBase
 {
     private static readonly JsonSerializerOptions ProgressJsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IModelMetadataService _metadataService;
+    private readonly IDaxExecutionService _daxExecutionService;
     private readonly ILogger<AiController> _logger;
 
-    public AiController(IModelMetadataService metadataService, ILogger<AiController> logger)
+    public AiController(
+        IModelMetadataService metadataService,
+        IDaxExecutionService daxExecutionService,
+        ILogger<AiController> logger)
     {
         _metadataService = metadataService;
+        _daxExecutionService = daxExecutionService;
         _logger = logger;
     }
 
@@ -48,7 +53,7 @@ public class AiController : ControllerBase
         }
 
         var aiProvider = new ClaudeProvider(apiKey, baseUrl, model);
-        var generator = new ReportGenerator(aiProvider, _metadataService);
+        var generator = new ReportGenerator(aiProvider, _metadataService, _daxExecutionService);
 
         try
         {
@@ -101,7 +106,7 @@ public class AiController : ControllerBase
         }
 
         var aiProvider = new ClaudeProvider(apiKey, baseUrl, model);
-        var generator = new ReportGenerator(aiProvider, _metadataService);
+        var generator = new ReportGenerator(aiProvider, _metadataService, _daxExecutionService);
 
         try
         {
@@ -124,6 +129,34 @@ public class AiController : ControllerBase
                 ProgressPercent = 100,
                 Message = $"修改失败: {ex.Message}"
             });
+        }
+    }
+
+    [HttpPost("compose-prompt")]
+    public async Task<IActionResult> ComposePrompt([FromBody] ComposePromptRequest request, CancellationToken cancellationToken)
+    {
+        var apiKey = Request.Headers["X-API-Key"].FirstOrDefault()
+            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+        var baseUrl = Request.Headers["X-API-BaseUrl"].FirstOrDefault();
+        var model = Request.Headers["X-API-Model"].FirstOrDefault();
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            return BadRequest(new { message = "未配置 AI API Key，请在应用设置中配置" });
+        }
+
+        var aiProvider = new ClaudeProvider(apiKey, baseUrl, model);
+        var generator = new ReportGenerator(aiProvider, _metadataService, _daxExecutionService);
+
+        try
+        {
+            var prompt = await generator.ComposePromptAsync(request, cancellationToken);
+            return Ok(new { prompt });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to compose prompt");
+            return BadRequest(new { message = $"生成提示词失败: {ex.Message}" });
         }
     }
 
