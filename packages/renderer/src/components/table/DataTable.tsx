@@ -2,6 +2,7 @@ import React from 'react';
 import type { TableConfig, TableColumnConfig } from '@vibe-bi/core';
 import { useTheme } from '../../theme/ThemeProvider';
 import { mixColors, withAlpha } from '../../theme/colorUtils';
+import { resolveFieldReference, toDisplayFieldLabel } from '../../utils/fieldResolution';
 
 export interface DataTableProps {
   config: TableConfig;
@@ -13,29 +14,41 @@ export function DataTable({ config, data, style }: DataTableProps) {
   const theme = useTheme();
   const dividerColor = withAlpha(theme.colors.text, 0.1);
   const zebraColor = withAlpha(theme.colors.primary, 0.05);
+  const rows = React.useMemo(() => data.filter((row): row is Record<string, unknown> => (
+    !!row && typeof row === 'object' && !Array.isArray(row)
+  )), [data]);
+  const availableFields = React.useMemo(() => {
+    if (rows.length === 0) {
+      return [];
+    }
+
+    return Object.keys(rows[0]).filter((field) => field !== '__rowIndex');
+  }, [rows]);
 
   // Auto-generate columns from data if no columns defined
   const columns = React.useMemo<TableColumnConfig[]>(() => {
     if (config.columns && config.columns.length > 0) {
       return config.columns.map((col) => ({
         ...col,
-        header: col.header || col.title || col.field,
+        field: resolveFieldReference(col.field, availableFields) || col.field,
+        header: col.header || col.title || (
+          resolveFieldReference(col.field, availableFields) !== col.field
+            ? col.field
+            : toDisplayFieldLabel(col.field) || col.field
+        ),
       }));
     }
-    if (!data || data.length === 0) {
+    if (rows.length === 0) {
       return [];
     }
-    // Generate columns from first data row
-    const firstRow = data[0] as Record<string, unknown>;
-    return Object.keys(firstRow)
-      .filter((key) => key !== '__rowIndex')
+    return availableFields
       .map((key) => ({
         field: key,
-        header: key,
+        header: toDisplayFieldLabel(key) || key,
       }));
-  }, [config.columns, data]);
+  }, [availableFields, config.columns, rows.length]);
 
-  if (!data || data.length === 0) {
+  if (rows.length === 0) {
     return (
       <div
         style={{
@@ -85,9 +98,10 @@ export function DataTable({ config, data, style }: DataTableProps) {
           style={{
             textAlign: 'left',
             color: theme.colors.text,
-            fontSize: 18,
+            fontSize: 15,
             fontWeight: 700,
-            marginBottom: 14,
+            lineHeight: 1.3,
+            marginBottom: 12,
             paddingBottom: 10,
             borderBottom: `1px solid ${dividerColor}`,
           }}
@@ -128,7 +142,7 @@ export function DataTable({ config, data, style }: DataTableProps) {
           </tr>
         </thead>
         <tbody>
-          {data.map((row, rowIndex) => (
+          {rows.map((row, rowIndex) => (
             <tr
               key={rowIndex}
               style={{
@@ -136,10 +150,10 @@ export function DataTable({ config, data, style }: DataTableProps) {
               }}
             >
               {columns.map((col) => {
-                const value = (row as Record<string, unknown>)[col.field];
+                const value = row[col.field];
                 return (
                   <td
-                    key={col.field}
+                    key={`${col.field}-${col.header}`}
                     style={{
                       padding: '12px 14px',
                       borderBottom: `1px solid ${dividerColor}`,

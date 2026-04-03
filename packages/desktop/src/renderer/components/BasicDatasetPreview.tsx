@@ -132,6 +132,28 @@ function formatMetricValue(value: number): string {
   }).format(value);
 }
 
+function formatPreviewCellValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  if (typeof value === 'number') {
+    return new Intl.NumberFormat('zh-CN', {
+      maximumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    }).format(value);
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否';
+  }
+
+  if (value instanceof Date) {
+    return value.toLocaleDateString('zh-CN');
+  }
+
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+}
+
 function buildSeriesPreview(
   chartType: DatasetVisualType,
   result: QueryResult
@@ -440,10 +462,133 @@ function renderCartesianPreview(
   );
 }
 
+function renderDataTablePreview(datasetName: string, result: QueryResult) {
+  const rows = (result.rows || []) as PreviewRow[];
+  const fields = getFieldNames(result);
+  const numericFields = new Set(getNumericFields(rows, fields));
+  const dimensionFields = fields.filter((field) => !numericFields.has(field));
+  const groupedFields = dimensionFields.slice(0, 2);
+  const previewRows = rows.slice(0, 10).map((row, rowIndex) => {
+    if (rowIndex === 0 || groupedFields.length === 0) {
+      return row;
+    }
+
+    const previousRow = rows[rowIndex - 1];
+    const collapsedRow: PreviewRow = { ...row };
+
+    groupedFields.forEach((field, fieldIndex) => {
+      const parentFields = groupedFields.slice(0, fieldIndex);
+      const parentMatches = parentFields.every((parentField) => (
+        String(previousRow[parentField] ?? '') === String(row[parentField] ?? '')
+      ));
+      const currentValue = String(row[field] ?? '');
+      const previousValue = String(previousRow[field] ?? '');
+
+      if (parentMatches && currentValue && currentValue === previousValue) {
+        collapsedRow[field] = '';
+      }
+    });
+
+    return collapsedRow;
+  });
+
+  return (
+    <div
+      style={{
+        height: '100%',
+        border: `1px solid ${shellPalette.border}`,
+        borderRadius: 10,
+        background: '#FFFFFF',
+        display: 'grid',
+        gridTemplateRows: 'auto auto minmax(0, 1fr)',
+        gap: 12,
+        padding: 16,
+        boxSizing: 'border-box',
+      }}
+    >
+      <div style={{ color: shellPalette.text, fontSize: 13, fontWeight: 700 }}>
+        {datasetName}
+      </div>
+      <div style={{ color: shellPalette.textMuted, fontSize: 11 }}>
+        透视表预览 · {fields.length} 列 / {rows.length} 行
+      </div>
+      <div
+        style={{
+          minHeight: 0,
+          overflow: 'auto',
+          borderRadius: 10,
+          border: `1px solid ${shellPalette.border}`,
+          background: '#F8FAFC',
+        }}
+      >
+        <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 11 }}>
+          <thead>
+            <tr>
+              {fields.map((field) => {
+                const isNumericField = numericFields.has(field);
+                return (
+                  <th
+                    key={field}
+                    style={{
+                      position: 'sticky',
+                      top: 0,
+                      zIndex: 1,
+                      padding: '10px 12px',
+                      textAlign: isNumericField ? 'right' : 'left',
+                      color: shellPalette.text,
+                      background: '#E2E8F0',
+                      borderBottom: `1px solid ${shellPalette.border}`,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {formatFieldLabel(field) || field}
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {previewRows.map((row, rowIndex) => (
+              <tr key={String(row.__rowIndex ?? rowIndex)}>
+                {fields.map((field, fieldIndex) => {
+                  const isNumericField = numericFields.has(field);
+                  const isGroupedField = groupedFields.includes(field);
+                  const isBlankRepeatedValue = String(row[field] ?? '') === '' && isGroupedField && rowIndex > 0;
+
+                  return (
+                    <td
+                      key={`${rowIndex}-${field}`}
+                      style={{
+                        padding: '9px 12px',
+                        textAlign: isNumericField ? 'right' : 'left',
+                        color: isBlankRepeatedValue ? 'transparent' : shellPalette.text,
+                        fontWeight: isGroupedField && !isBlankRepeatedValue ? 600 : 400,
+                        background: fieldIndex < groupedFields.length ? '#F8FAFC' : rowIndex % 2 === 0 ? '#FFFFFF' : '#FBFDFF',
+                        borderBottom: `1px solid ${shellPalette.border}`,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {formatPreviewCellValue(row[field])}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function BasicDatasetPreview({ datasetName, chartType, result }: BasicDatasetPreviewProps) {
   const previewContent = React.useMemo(() => {
     if (chartType === 'kpi-card') {
       return renderKpiPreview(datasetName, result);
+    }
+
+    if (chartType === 'data-table') {
+      return renderDataTablePreview(datasetName, result);
     }
 
     const model = buildSeriesPreview(chartType, result);

@@ -1,8 +1,12 @@
-import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState, type ComponentType as ReactComponentType, type ReactNode } from 'react';
 import type { ComponentDefinition, QueryDefinition, DataSourceConfig, FilterDefinition } from '@vibe-bi/core';
 import { GridItem } from './GridLayout';
 import { registry } from '../components/registry';
 import { useQueryData } from '../data/useQueryData';
+import { EChartsWrapper } from '../components/charts/EChartsWrapper';
+import { HtmlChartRenderer } from '../components/charts/HtmlChartRenderer';
+
+export type ChartRendererMode = 'html' | 'echarts';
 
 export interface ComponentBridgeProps {
   component: ComponentDefinition;
@@ -10,6 +14,7 @@ export interface ComponentBridgeProps {
   dataSource: DataSourceConfig;
   pageFilters?: FilterDefinition[];
   apiBaseUrl?: string;
+  chartRendererMode?: ChartRendererMode;
   isActive?: boolean;
   showInspectorActions?: boolean;
 }
@@ -20,38 +25,44 @@ export function ComponentBridge({
   dataSource,
   pageFilters,
   apiBaseUrl,
+  chartRendererMode = 'html',
   isActive = false,
   showInspectorActions = false,
 }: ComponentBridgeProps) {
-  const renderer = registry.get(component.type);
+  const normalizedType = String(component.type || '').trim().toLowerCase() as ComponentDefinition['type'];
+  const normalizedComponent = normalizedType === component.type
+    ? component
+    : { ...component, type: normalizedType };
+  const renderer = registry.get(normalizedType);
 
   console.log('[ComponentBridge] Rendering component:', {
-    id: component.id,
-    type: component.type,
-    queryRef: component.queryRef,
+    id: normalizedComponent.id,
+    type: normalizedComponent.type,
+    queryRef: normalizedComponent.queryRef,
     hasRenderer: !!renderer,
   });
 
   if (!renderer) {
     return (
-      <GridItem position={component.position}>
+      <GridItem position={normalizedComponent.position}>
         <div style={{ padding: 16, color: '#ff6b6b' }}>
-          Unknown component type: {component.type}
+          Unknown component type: {normalizedComponent.type}
         </div>
       </GridItem>
     );
   }
 
   return (
-    <GridItem position={component.position}>
+    <GridItem position={normalizedComponent.position}>
       <Suspense fallback={<ComponentSkeleton />}>
         <ComponentWrapper
-          component={component}
+          component={normalizedComponent}
           queries={queries}
           dataSource={dataSource}
           renderer={renderer}
           pageFilters={pageFilters}
           apiBaseUrl={apiBaseUrl}
+          chartRendererMode={chartRendererMode}
           isActive={isActive}
           showInspectorActions={showInspectorActions}
         />
@@ -67,6 +78,7 @@ interface ComponentWrapperProps {
   renderer: ReturnType<typeof registry.get>;
   pageFilters?: FilterDefinition[];
   apiBaseUrl?: string;
+  chartRendererMode?: ChartRendererMode;
   isActive?: boolean;
   showInspectorActions?: boolean;
 }
@@ -80,6 +92,7 @@ function ComponentWrapper({
   renderer,
   pageFilters,
   apiBaseUrl,
+  chartRendererMode = 'html',
   isActive = false,
   showInspectorActions = false,
 }: ComponentWrapperProps) {
@@ -151,7 +164,9 @@ function ComponentWrapper({
     );
   }
 
-  const Comp = renderer!.component;
+  const Comp = (component.type === 'echarts'
+    ? (chartRendererMode === 'echarts' ? EChartsWrapper : HtmlChartRenderer)
+    : renderer!.component) as ReactComponentType<any>;
   const rawConfig = { ...renderer!.defaultConfig, ...(component.config || {}) } as Record<string, unknown>;
   const titleFallback = query?.name || component.id;
   const normalizedConfig = component.type === 'echarts'

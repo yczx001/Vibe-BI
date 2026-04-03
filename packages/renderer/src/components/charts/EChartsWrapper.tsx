@@ -1,8 +1,9 @@
 import { useRef, useEffect, useMemo, type CSSProperties } from 'react';
 import * as echarts from 'echarts';
-import type { ChartConfig, ThemeDefinition } from '@vibe-bi/core';
+import type { AxisConfig, ChartConfig, SeriesConfig, ThemeDefinition } from '@vibe-bi/core';
 import { useTheme } from '../../theme/ThemeProvider';
 import { mixColors, withAlpha } from '../../theme/colorUtils';
+import { resolveFieldReference, toDisplayFieldLabel } from '../../utils/fieldResolution';
 
 export interface EChartsWrapperProps {
   config: ChartConfig;
@@ -14,10 +15,33 @@ export function EChartsWrapper({ config, data, style }: EChartsWrapperProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
   const theme = useTheme();
+  const rows = useMemo(() => getRows(data), [data]);
+  const allFields = useMemo(() => getFieldNames(rows), [rows]);
+  const resolvedConfig = useMemo(() => resolveChartConfigFields(config, allFields), [allFields, config]);
+
+  useEffect(() => {
+    const configuredFields = [
+      config.xAxis?.field,
+      ...config.series.map((series) => series.field),
+      ...((Array.isArray(config.yAxis) ? config.yAxis : (config.yAxis ? [config.yAxis] : [])).map((axis) => axis.field)),
+    ].filter(Boolean) as string[];
+
+    const missingFields = Array.from(new Set(configuredFields.filter((field) => !resolveFieldReference(field, allFields))));
+    if (missingFields.length === 0 || allFields.length === 0) {
+      return;
+    }
+
+    console.warn('[EChartsWrapper] Configured fields missing from query result, using inferred fallback fields:', {
+      chartType: config.chartType,
+      title: config.title,
+      missingFields,
+      availableFields: allFields,
+    });
+  }, [allFields, config.chartType, config.series, config.title, config.xAxis, config.yAxis]);
 
   const option = useMemo(() => {
-    return buildEChartsOption(config, data, theme);
-  }, [config, data, theme]);
+    return buildEChartsOption(resolvedConfig, data, theme);
+  }, [data, resolvedConfig, theme]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -78,6 +102,7 @@ function buildEChartsOption(
   theme: ThemeDefinition
 ): echarts.EChartsOption {
   const colors = theme.colors.chart;
+  const legendPosition = config.legend?.position || 'top';
   const baseOption: echarts.EChartsOption = {
     backgroundColor: 'transparent',
     textStyle: {
@@ -93,7 +118,7 @@ function buildEChartsOption(
       top: 4,
       textStyle: {
         color: theme.colors.text,
-        fontSize: 14,
+        fontSize: 15,
         fontWeight: 700,
       },
     };
@@ -112,9 +137,12 @@ function buildEChartsOption(
   if (config.legend?.show !== false) {
     baseOption.legend = {
       show: true,
-      top: config.title ? 24 : 4,
-      left: 'left',
-      textStyle: { color: theme.colors.textSecondary, fontSize: 11 },
+      top: legendPosition === 'top' ? (config.title ? 28 : 4) : undefined,
+      bottom: legendPosition === 'bottom' ? 4 : undefined,
+      left: legendPosition === 'left' ? 8 : legendPosition === 'right' ? undefined : 'left',
+      right: legendPosition === 'right' ? 8 : undefined,
+      orient: legendPosition === 'left' || legendPosition === 'right' ? 'vertical' : 'horizontal',
+      textStyle: { color: theme.colors.textSecondary, fontSize: 10 },
     };
   }
 
@@ -129,6 +157,23 @@ function buildEChartsOption(
     default:
       return baseOption;
   }
+}
+
+function resolveCartesianGrid(config: ChartConfig) {
+  const legendPosition = config.legend?.position || 'top';
+  const titleSpace = config.title ? 34 : 6;
+  const topLegendSpace = config.legend?.show === false || legendPosition !== 'top' ? 0 : 26;
+  const bottomLegendSpace = config.legend?.show === false || legendPosition !== 'bottom' ? 0 : 34;
+  const leftSpace = legendPosition === 'left' ? 132 : 56;
+  const rightSpace = legendPosition === 'right' ? 148 : 28;
+
+  return {
+    top: titleSpace + topLegendSpace,
+    bottom: 22 + bottomLegendSpace,
+    left: leftSpace,
+    right: rightSpace,
+    containLabel: true,
+  };
 }
 
 type ChartRow = Record<string, unknown>;
@@ -181,8 +226,20 @@ function getNumericFields(rows: ChartRow[], fields: string[]): string[] {
   return fields.filter((field) => rows.some((row) => isNumericLike(row[field])));
 }
 
+function isUsableNumericField(rows: ChartRow[], fields: string[], field?: string): field is string {
+  return Boolean(field && fields.includes(field) && rows.some((row) => isNumericLike(row[field])));
+}
+
+function getUsableConfiguredSeries(
+  config: ChartConfig,
+  rows: ChartRow[],
+  fields: string[]
+): ChartConfig['series'] {
+  return config.series.filter((series) => isUsableNumericField(rows, fields, series.field));
+}
+
 function getCategoryField(rows: ChartRow[], fields: string[], valueFields: string[], preferredField?: string): string {
-  if (preferredField && fields.includes(preferredField)) {
+  if (preferredField && fields.includes(preferredField) && !valueFields.includes(preferredField)) {
     return preferredField;
   }
 
@@ -231,7 +288,7 @@ function getPieCategoryField(rows: ChartRow[], fields: string[], valueFields: st
     .filter((item) => item.distinctCount > 0)
     .sort((a, b) => a.distinctCount - b.distinctCount);
 
-  if (preferredField && fields.includes(preferredField)) {
+  if (preferredField && fields.includes(preferredField) && !valueFields.includes(preferredField)) {
     const preferredLooksTemporal = isTemporalFieldName(preferredField)
       || rows.some((row) => isTemporalFieldValue(row[preferredField]));
 
@@ -245,6 +302,17 @@ function getPieCategoryField(rows: ChartRow[], fields: string[], valueFields: st
   }
 
   return getCategoryField(rows, fields, valueFields, preferredField);
+}
+
+function getPrimaryYAxis(config: ChartConfig): AxisConfig | undefined {
+  if (Array.isArray(config.yAxis)) {
+    return config.yAxis[0];
+  }
+
+  const rawYAxis = (config as ChartConfig & { yAxis?: AxisConfig | AxisConfig[] }).yAxis;
+  return rawYAxis && !Array.isArray(rawYAxis)
+    ? rawYAxis
+    : undefined;
 }
 
 function normalizeSeriesValue(value: unknown): number | string | null {
@@ -270,15 +338,53 @@ function normalizeSeriesValue(value: unknown): number | string | null {
 }
 
 function formatFieldLabel(field: string): string {
-  if (!field) {
-    return '数值';
+  return toDisplayFieldLabel(field) || '数值';
+}
+
+function resolveAxisField(axis: AxisConfig | undefined, availableFields: string[], preserveDisplayName: boolean): AxisConfig | undefined {
+  if (!axis) {
+    return undefined;
   }
 
-  return field
-    .replace(/'/g, '')
-    .replace(/\[|\]/g, '')
-    .replace(/__/g, ' ')
-    .trim();
+  const resolvedField = resolveFieldReference(axis.field, availableFields) || axis.field;
+  if (resolvedField === axis.field) {
+    return axis;
+  }
+
+  return {
+    ...axis,
+    field: resolvedField,
+    name: axis.name || (preserveDisplayName ? axis.field : axis.name),
+  };
+}
+
+function resolveSeriesField(series: SeriesConfig, availableFields: string[]): SeriesConfig {
+  const resolvedField = resolveFieldReference(series.field, availableFields) || series.field;
+  if (resolvedField === series.field) {
+    return series;
+  }
+
+  return {
+    ...series,
+    field: resolvedField,
+    name: series.name || series.field,
+  };
+}
+
+function resolveChartConfigFields(config: ChartConfig, availableFields: string[]): ChartConfig {
+  const rawYAxis = (config as ChartConfig & { yAxis?: AxisConfig | AxisConfig[] }).yAxis;
+  const resolvedYAxis = Array.isArray(rawYAxis)
+    ? rawYAxis.map((axis) => resolveAxisField(axis, availableFields, true))
+    : rawYAxis
+      ? [resolveAxisField(rawYAxis, availableFields, true)].filter(Boolean)
+      : undefined;
+
+  return {
+    ...config,
+    xAxis: resolveAxisField(config.xAxis, availableFields, false),
+    yAxis: resolvedYAxis as AxisConfig[] | undefined,
+    series: config.series.map((series) => resolveSeriesField(series, availableFields)),
+  };
 }
 
 function buildLineOption(
@@ -289,8 +395,10 @@ function buildLineOption(
 ): echarts.EChartsOption {
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
-  const configuredSeriesFields = config.series.map((series) => series.field).filter(Boolean);
+  const usableConfiguredSeries = getUsableConfiguredSeries(config, rows, allFields);
+  const configuredSeriesFields = usableConfiguredSeries.map((series) => series.field).filter(Boolean);
   const numericFields = getNumericFields(rows, allFields);
+  const primaryYAxis = getPrimaryYAxis(config);
   const valueFields = configuredSeriesFields.length > 0
     ? configuredSeriesFields
     : numericFields.length > 0
@@ -300,8 +408,8 @@ function buildLineOption(
   const xField = getCategoryField(rows, allFields, valueFields, config.xAxis?.field);
   const xData = rows.map((row, index) => normalizeSeriesValue(row[xField] ?? row.__rowIndex ?? index + 1));
 
-  const seriesConfig = config.series.length > 0
-    ? config.series
+  const seriesConfig = usableConfiguredSeries.length > 0
+    ? usableConfiguredSeries
     : valueFields.filter(Boolean).map((field) => ({
       field,
       name: formatFieldLabel(field),
@@ -315,12 +423,12 @@ function buildLineOption(
       type: config.xAxis?.type || 'category',
       data: xData as any,
       axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
-      axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
     },
     yAxis: {
-      type: 'value',
+      type: primaryYAxis?.type === 'category' ? 'value' : (primaryYAxis?.type || 'value'),
       splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
-      axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+      axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
     },
     series: seriesConfig.map((s) => {
       const color = (s as { color?: string }).color;
@@ -334,13 +442,7 @@ function buildLineOption(
       itemStyle: color ? { color } : undefined,
     });
     }) as any,
-    grid: {
-      left: '4%',
-      right: '4%',
-      bottom: '10%',
-      top: config.title ? 60 : 34,
-      containLabel: true,
-    },
+    grid: resolveCartesianGrid(config),
   };
 }
 
@@ -352,22 +454,25 @@ function buildBarOption(
 ): echarts.EChartsOption {
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
-  const configuredSeriesFields = config.series.map((series) => series.field).filter(Boolean);
+  const usableConfiguredSeries = getUsableConfiguredSeries(config, rows, allFields);
+  const configuredSeriesFields = usableConfiguredSeries.map((series) => series.field).filter(Boolean);
   const numericFields = getNumericFields(rows, allFields);
+  const primaryYAxis = getPrimaryYAxis(config);
   const valueFields = configuredSeriesFields.length > 0
     ? configuredSeriesFields
     : numericFields.length > 0
       ? numericFields
       : [allFields.find((field) => field !== config.xAxis?.field) || allFields[0] || ''];
 
-  const xField = getCategoryField(rows, allFields, valueFields, config.xAxis?.field);
-  const xData = rows.map((row, index) => normalizeSeriesValue(row[xField] ?? row.__rowIndex ?? index + 1));
-  const configuredYAxis = Array.isArray(config.yAxis) ? config.yAxis[0] : undefined;
   const isHorizontal = config.orientation === 'horizontal'
-    || (config.xAxis?.type === 'value' && configuredYAxis?.type === 'category');
+    || (config.xAxis?.type === 'value' && primaryYAxis?.type === 'category');
+  const categoryField = isHorizontal
+    ? getCategoryField(rows, allFields, valueFields, primaryYAxis?.field)
+    : getCategoryField(rows, allFields, valueFields, config.xAxis?.field);
+  const categoryData = rows.map((row, index) => normalizeSeriesValue(row[categoryField] ?? row.__rowIndex ?? index + 1));
 
-  const seriesConfig = config.series.length > 0
-    ? config.series
+  const seriesConfig = usableConfiguredSeries.length > 0
+    ? usableConfiguredSeries
     : valueFields.filter(Boolean).map((field) => ({
       field,
       name: formatFieldLabel(field),
@@ -379,30 +484,30 @@ function buildBarOption(
     xAxis: isHorizontal
       ? {
         type: 'value',
-        name: config.xAxis?.name || configuredYAxis?.name,
+        name: config.xAxis?.name,
         splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
-        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
       }
       : {
-        type: config.xAxis?.type || 'category',
-        data: xData as any,
+        type: config.xAxis?.type === 'time' ? 'time' : 'category',
+        data: categoryData as any,
         name: config.xAxis?.name,
         axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
-        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
       },
     yAxis: isHorizontal
       ? {
         type: 'category',
-        data: xData as any,
-        name: configuredYAxis?.name || config.xAxis?.name,
+        data: categoryData as any,
+        name: primaryYAxis?.name || formatFieldLabel(categoryField),
         axisLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.24) } },
-        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
       }
       : {
-        type: configuredYAxis?.type || 'value',
-        name: configuredYAxis?.name,
+        type: primaryYAxis?.type === 'category' ? 'value' : (primaryYAxis?.type || 'value'),
+        name: primaryYAxis?.name,
         splitLine: { lineStyle: { color: withAlpha(theme.colors.text, 0.12) } },
-        axisLabel: { color: theme.colors.textSecondary, fontSize: 11 },
+        axisLabel: { color: theme.colors.textSecondary, fontSize: 10 },
       },
     series: seriesConfig.map((s) => {
       const color = (s as { color?: string }).color;
@@ -417,11 +522,8 @@ function buildBarOption(
     });
     }) as any,
     grid: {
-      left: isHorizontal ? '8%' : '4%',
-      right: '4%',
-      bottom: '10%',
-      top: config.title ? 60 : 34,
-      containLabel: true,
+      ...resolveCartesianGrid(config),
+      left: isHorizontal ? 88 : resolveCartesianGrid(config).left,
     },
   };
 }
@@ -435,10 +537,14 @@ function buildPieOption(
   const rows = getRows(data);
   const allFields = getFieldNames(rows);
   const numericFields = getNumericFields(rows, allFields);
-  const configuredValueField = config.series[0]?.field;
+  const configuredValueField = isUsableNumericField(rows, allFields, config.series[0]?.field)
+    ? config.series[0]?.field
+    : undefined;
   const valueField = configuredValueField || numericFields[0] || allFields[1] || allFields[0] || '';
   const nameField = getPieCategoryField(rows, allFields, [valueField].filter(Boolean), config.xAxis?.field);
   const aggregatedData = new Map<string, number>();
+  const legendPosition = config.legend?.position || 'right';
+  const showDataLabels = config.dataLabels?.show === true;
   const titleConfig = config.title
     ? {
       ...((baseOption.title || {}) as Record<string, unknown>),
@@ -463,10 +569,11 @@ function buildPieOption(
     },
     legend: {
       ...(baseOption.legend || {}),
-      orient: 'vertical',
-      right: 12,
-      top: 'middle',
-      bottom: 'auto',
+      orient: legendPosition === 'left' || legendPosition === 'right' ? 'vertical' : 'horizontal',
+      right: legendPosition === 'right' ? 10 : undefined,
+      left: legendPosition === 'left' ? 10 : legendPosition === 'top' || legendPosition === 'bottom' ? 'center' : undefined,
+      top: legendPosition === 'top' ? (config.title ? 28 : 4) : legendPosition === 'left' || legendPosition === 'right' ? 'middle' : undefined,
+      bottom: legendPosition === 'bottom' ? 4 : undefined,
     },
     title: titleConfig,
     animationDuration: 400,
@@ -474,27 +581,37 @@ function buildPieOption(
     series: [
       {
         type: 'pie',
-        radius: ['40%', '70%'],
-        center: ['34%', '50%'],
-        avoidLabelOverlap: false,
+        radius: showDataLabels ? ['38%', '66%'] : ['42%', '72%'],
+        center: legendPosition === 'right'
+          ? ['34%', '56%']
+          : legendPosition === 'left'
+            ? ['66%', '56%']
+            : ['50%', legendPosition === 'bottom' ? '44%' : '56%'],
+        avoidLabelOverlap: true,
         itemStyle: {
           borderRadius: 8,
           borderColor: mixColors(theme.colors.surface, theme.colors.background, 0.92, theme.colors.surface),
           borderWidth: 2,
         },
         label: {
-          show: false,
-          position: 'center',
+          show: showDataLabels,
+          position: showDataLabels ? (config.dataLabels?.position === 'center' ? 'center' : 'outside') : 'center',
+          color: theme.colors.text,
+          fontSize: 10,
+          formatter: '{b}: {d}%',
         },
         emphasis: {
           label: {
             show: true,
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: 'bold',
             color: theme.colors.text,
           },
         },
-        labelLine: { show: false },
+        labelLine: { show: showDataLabels },
+        labelLayout: {
+          hideOverlap: true,
+        },
         data: Array.from(aggregatedData.entries()).map(([name, value]) => ({
           name,
           value,

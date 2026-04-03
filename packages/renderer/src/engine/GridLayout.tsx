@@ -42,19 +42,20 @@ function resolveGridPosition(position?: Partial<PositionConfig> | null): Positio
   }
 
   return {
-    x: resolveNumber(position.x, defaultGridPosition.x),
-    y: resolveNumber(position.y, defaultGridPosition.y),
-    w: resolveNumber(position.w, defaultGridPosition.w, 1),
-    h: resolveNumber(position.h, defaultGridPosition.h, 1),
+    x: Math.max(0, Math.round(resolveNumber(position.x, defaultGridPosition.x))),
+    y: Math.max(0, Math.round(resolveNumber(position.y, defaultGridPosition.y))),
+    w: Math.max(1, Math.round(resolveNumber(position.w, defaultGridPosition.w, 1))),
+    h: Math.max(1, Math.round(resolveNumber(position.h, defaultGridPosition.h, 1))),
   };
 }
 
 export interface GridLayoutProps {
   layout?: Partial<LayoutConfig> | null;
   children: React.ReactNode;
+  fillHeight?: boolean;
 }
 
-export function GridLayout({ layout, children }: GridLayoutProps) {
+export function GridLayout({ layout, children, fillHeight = true }: GridLayoutProps) {
   const resolvedLayout = resolveGridLayout(layout);
 
   return (
@@ -63,9 +64,12 @@ export function GridLayout({ layout, children }: GridLayoutProps) {
       style={{
         display: 'grid',
         gridTemplateColumns: `repeat(${resolvedLayout.columns}, 1fr)`,
+        gridAutoRows: `${resolvedLayout.rowHeight}px`,
         gap: resolvedLayout.gap,
         width: '100%',
-        minHeight: '100%',
+        height: fillHeight ? '100%' : 'auto',
+        minHeight: fillHeight ? '100%' : undefined,
+        alignContent: 'start',
       }}
     >
       {children}
@@ -89,6 +93,8 @@ export function GridItem({ position, children, rowHeight = defaultGridLayout.row
         gridColumn: `${resolvedPosition.x + 1} / span ${resolvedPosition.w}`,
         gridRow: `${resolvedPosition.y + 1} / span ${resolvedPosition.h}`,
         minHeight: resolvedPosition.h * rowHeight,
+        minWidth: 0,
+        height: '100%',
       }}
     >
       {children}

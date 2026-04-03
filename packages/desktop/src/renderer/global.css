@@ -39,6 +39,21 @@ body {
   overflow: hidden;
 }
 
+html[data-browser-preview='1'],
+html[data-browser-preview='1'] body {
+  overflow: auto;
+}
+
+html[data-browser-preview='1'] #root {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
+html[data-browser-preview='1'] body {
+  min-width: 0;
+}
+
 body,
 button,
 input,

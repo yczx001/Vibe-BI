@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { shellPalette } from './DesktopShell';
 
 export interface ReportCanvasViewportProps {
   children: React.ReactNode;
   contentKey?: string | number | null;
   width?: number;
   height?: number;
+  contentHeightMode?: 'fixed' | 'auto';
+  surfaceMode?: 'card' | 'document';
   zoomMode: 'fit' | 'manual';
   fitZoomPercent: number;
   manualZoomPercent: number;
@@ -34,6 +37,8 @@ export function ReportCanvasViewport({
   contentKey,
   width = 1920,
   height = 1080,
+  contentHeightMode = 'fixed',
+  surfaceMode = 'card',
   zoomMode,
   fitZoomPercent,
   manualZoomPercent,
@@ -42,14 +47,19 @@ export function ReportCanvasViewport({
   onManualZoomPercentChange,
 }: ReportCanvasViewportProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  const [measuredContentHeight, setMeasuredContentHeight] = useState(height);
 
   const effectiveZoomPercent = zoomMode === 'fit' ? fitZoomPercent : manualZoomPercent;
   const scale = effectiveZoomPercent / 100;
   const scaledWidth = width * scale;
-  const scaledHeight = height * scale;
+  const intrinsicContentHeight = contentHeightMode === 'auto'
+    ? Math.max(height, measuredContentHeight)
+    : height;
+  const scaledHeight = intrinsicContentHeight * scale;
   const workspaceWidth = Math.max(
     Math.ceil(scaledWidth + CANVAS_PADDING * 2),
     viewportSize.width + WORKSPACE_SCROLL_GUTTER_X
@@ -60,6 +70,10 @@ export function ReportCanvasViewport({
   );
   const canvasLeft = Math.max(CANVAS_PADDING, Math.round((workspaceWidth - scaledWidth) / 2));
   const canvasTop = CANVAS_PADDING;
+
+  useEffect(() => {
+    setMeasuredContentHeight(height);
+  }, [contentKey, height]);
 
   useEffect(() => {
     onZoomModeChange('fit');
@@ -126,6 +140,80 @@ export function ReportCanvasViewport({
     };
   }, [isPanning]);
 
+  useEffect(() => {
+    if (contentHeightMode !== 'auto') {
+      return undefined;
+    }
+
+    const content = contentRef.current;
+    if (!content) {
+      return undefined;
+    }
+
+    const measureContentHeight = () => {
+      const firstElement = content.firstElementChild as HTMLElement | null;
+      const nextHeight = Math.max(
+        height,
+        Math.ceil(content.scrollHeight || 0),
+        Math.ceil(content.offsetHeight || 0),
+        Math.ceil(content.getBoundingClientRect().height || 0),
+        Math.ceil(firstElement?.scrollHeight || 0),
+        Math.ceil(firstElement?.offsetHeight || 0),
+        Math.ceil(firstElement?.getBoundingClientRect().height || 0)
+      );
+
+      setMeasuredContentHeight((previous) => (
+        previous === nextHeight ? previous : nextHeight
+      ));
+    };
+
+    let rafId = 0;
+    let timeoutId = 0;
+    const scheduleMeasure = () => {
+      cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(() => {
+        measureContentHeight();
+      });
+    };
+
+    scheduleMeasure();
+    timeoutId = window.setTimeout(scheduleMeasure, 180);
+
+    const observer = new ResizeObserver(() => {
+      scheduleMeasure();
+    });
+    observer.observe(content);
+    const firstElement = content.firstElementChild as HTMLElement | null;
+    if (firstElement) {
+      observer.observe(firstElement);
+    }
+
+    const mutationObserver = new MutationObserver(() => {
+      scheduleMeasure();
+    });
+    mutationObserver.observe(content, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+
+    if ('fonts' in document) {
+      document.fonts.ready.then(() => {
+        scheduleMeasure();
+      }).catch(() => {
+        // Ignore font readiness failures and rely on other measurement triggers.
+      });
+    }
+
+    return () => {
+      observer.disconnect();
+      mutationObserver.disconnect();
+      cancelAnimationFrame(rafId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [contentHeightMode, contentKey, height]);
+
   const applyManualZoom = (nextZoom: number) => {
     const clamped = clampZoom(nextZoom);
     onZoomModeChange('manual');
@@ -168,15 +256,15 @@ export function ReportCanvasViewport({
 
   const containerStyle = useMemo<React.CSSProperties>(() => ({
     width,
-    height,
+    height: intrinsicContentHeight,
     transform: `scale(${scale})`,
     transformOrigin: 'top left',
-    background: '#FFFFFF',
-    borderRadius: 18,
-    overflow: 'hidden',
-    border: '1px solid rgba(20, 37, 56, 0.14)',
-    boxShadow: '0 24px 60px rgba(15, 23, 42, 0.12)',
-  }), [height, scale, width]);
+    background: surfaceMode === 'document' ? 'transparent' : '#FFFFFF',
+    borderRadius: surfaceMode === 'document' ? 0 : 18,
+    overflow: contentHeightMode === 'auto' ? 'visible' : 'hidden',
+    border: surfaceMode === 'document' ? 'none' : '1px solid rgba(20, 37, 56, 0.14)',
+    boxShadow: surfaceMode === 'document' ? 'none' : '0 24px 60px rgba(15, 23, 42, 0.12)',
+  }), [contentHeightMode, intrinsicContentHeight, scale, surfaceMode, width]);
 
   return (
     <div
@@ -199,23 +287,25 @@ export function ReportCanvasViewport({
           overflowY: 'scroll',
           borderRadius: 16,
           border: `1px solid ${shellPalette.border}`,
-          background: `
-            linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(244,247,250,0.86) 100%),
-            repeating-linear-gradient(
-              0deg,
-              rgba(148, 163, 184, 0.08) 0,
-              rgba(148, 163, 184, 0.08) 1px,
-              transparent 1px,
-              transparent 20px
-            ),
-            repeating-linear-gradient(
-              90deg,
-              rgba(148, 163, 184, 0.08) 0,
-              rgba(148, 163, 184, 0.08) 1px,
-              transparent 1px,
-              transparent 20px
-            )
-          `,
+          background: surfaceMode === 'document'
+            ? shellPalette.workspaceBg
+            : `
+              linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(244,247,250,0.86) 100%),
+              repeating-linear-gradient(
+                0deg,
+                rgba(148, 163, 184, 0.08) 0,
+                rgba(148, 163, 184, 0.08) 1px,
+                transparent 1px,
+                transparent 20px
+              ),
+              repeating-linear-gradient(
+                90deg,
+                rgba(148, 163, 184, 0.08) 0,
+                rgba(148, 163, 184, 0.08) 1px,
+                transparent 1px,
+                transparent 20px
+              )
+            `,
           cursor: isPanning ? 'grabbing' : 'grab',
           userSelect: isPanning ? 'none' : 'auto',
           scrollbarGutter: 'stable both-edges',
@@ -245,7 +335,16 @@ export function ReportCanvasViewport({
             }}
           >
             <div style={containerStyle}>
-              {children}
+              <div
+                ref={contentRef}
+                style={{
+                  width,
+                  minHeight: height,
+                  height: contentHeightMode === 'auto' ? 'auto' : height,
+                }}
+              >
+                {children}
+              </div>
             </div>
           </div>
         </div>

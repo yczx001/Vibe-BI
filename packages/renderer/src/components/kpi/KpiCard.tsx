@@ -2,6 +2,7 @@ import React from 'react';
 import type { KpiConfig, ValueFormat } from '@vibe-bi/core';
 import { useTheme } from '../../theme/ThemeProvider';
 import { mixColors, withAlpha } from '../../theme/colorUtils';
+import { resolveFieldReference } from '../../utils/fieldResolution';
 
 export interface KpiCardProps {
   config: KpiConfig;
@@ -17,47 +18,68 @@ export function KpiCard({ config, data, style }: KpiCardProps) {
     comparisonTitle?: string;
     showCompare?: boolean;
   };
-
-  const valueField = React.useMemo(() => {
-    if (config.valueField) {
-      return config.valueField;
+  const rows = React.useMemo(() => data.filter((row): row is Record<string, unknown> => (
+    !!row && typeof row === 'object' && !Array.isArray(row)
+  )), [data]);
+  const availableFields = React.useMemo(() => {
+    if (rows.length === 0) {
+      return [];
     }
 
-    if (!data || data.length === 0) {
+    return Object.keys(rows[0]).filter((field) => field !== '__rowIndex');
+  }, [rows]);
+
+  const valueField = React.useMemo(() => {
+    const resolvedConfiguredField = resolveFieldReference(config.valueField, availableFields);
+    if (resolvedConfiguredField) {
+      return resolvedConfiguredField;
+    }
+
+    if (rows.length === 0) {
       return '';
     }
 
-    const row = data[0] as Record<string, unknown>;
-    const numericField = Object.keys(row).find((field) => {
-      if (field === '__rowIndex') {
-        return false;
-      }
-
+    const numericField = availableFields.find((field) => rows.some((row) => {
       const value = row[field];
       return typeof value === 'number' || (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value)));
-    });
+    }));
 
-    return numericField || Object.keys(row).find((field) => field !== '__rowIndex') || '';
-  }, [config.valueField, data]);
+    return numericField || availableFields[0] || '';
+  }, [availableFields, config.valueField, rows]);
 
   const value = React.useMemo(() => {
-    if (!data || data.length === 0) return null;
-    const row = data[0] as Record<string, unknown>;
+    if (rows.length === 0 || !valueField) return null;
+    const row = rows[0];
     return row[valueField];
-  }, [data, valueField]);
+  }, [rows, valueField]);
 
-  const comparisonValue = React.useMemo(() => {
-    if (!data || data.length === 0) return null;
-    const row = data[0] as Record<string, unknown>;
+  React.useEffect(() => {
+    if (rows.length === 0 || !config.valueField || value !== undefined) {
+      return;
+    }
+
+    if (!valueField) {
+      console.warn('[KpiCard] Value field not found in row:', {
+        title: config.title,
+        valueField: config.valueField,
+        availableFields,
+      });
+      return;
+    }
+  }, [availableFields, config.title, config.valueField, rows, value, valueField]);
+
+  const comparisonTargetField = React.useMemo(() => {
     const targetField = config.comparison?.targetField
       || configAliases.comparisonField
       || configAliases.compareField;
 
-    if (targetField) {
-      return row[targetField];
-    }
-    return null;
-  }, [data, config.comparison, configAliases.comparisonField, configAliases.compareField]);
+    return resolveFieldReference(targetField, availableFields);
+  }, [availableFields, config.comparison?.targetField, configAliases.comparisonField, configAliases.compareField]);
+
+  const comparisonValue = React.useMemo(() => {
+    if (rows.length === 0 || !comparisonTargetField) return null;
+    return rows[0][comparisonTargetField];
+  }, [comparisonTargetField, rows]);
 
   const formattedValue = React.useMemo(() => {
     if (value === null || value === undefined) return '-';
@@ -105,22 +127,51 @@ export function KpiCard({ config, data, style }: KpiCardProps) {
       />
       <div
         style={{
-          fontSize: 11,
-          letterSpacing: 0.9,
-          color: theme.colors.textSecondary,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
           marginBottom: 12,
-          fontWeight: 700,
         }}
       >
-        KPI SNAPSHOT
+        <div
+          style={{
+            fontSize: 10,
+            letterSpacing: 0.6,
+            color: theme.colors.textSecondary,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+          }}
+        >
+          关键指标
+        </div>
+        {config.icon ? (
+          <div
+            aria-hidden="true"
+            style={{
+              width: 34,
+              height: 34,
+              display: 'grid',
+              placeItems: 'center',
+              borderRadius: 12,
+              background: withAlpha(theme.colors.primary, 0.12),
+              color: theme.colors.primary,
+              fontSize: 18,
+              lineHeight: 1,
+              boxShadow: `inset 0 0 0 1px ${withAlpha(theme.colors.primary, 0.14)}`,
+            }}
+          >
+            {config.icon}
+          </div>
+        ) : null}
       </div>
       <div style={{ display: 'grid', gap: 8 }}>
         <div
           style={{
-            fontSize: 16,
+            fontSize: 15,
             fontWeight: 700,
             color: theme.colors.text,
-            lineHeight: 1.25,
+            lineHeight: 1.3,
           }}
         >
           {config.title}

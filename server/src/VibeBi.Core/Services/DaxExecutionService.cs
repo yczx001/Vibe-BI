@@ -1,4 +1,8 @@
 using System.Data;
+using System.Data.Common;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AnalysisServices.AdomdClient;
 using VibeBi.Core.Models;
 
@@ -20,6 +24,9 @@ public record DaxValidationResult
 
 public class DaxExecutionService : IDaxExecutionService
 {
+    private static DateTimeOffset _cachedPortScanAt = DateTimeOffset.MinValue;
+    private static IReadOnlyList<int> _cachedPowerBiPorts = Array.Empty<int>();
+
     private string NormalizeConnectionString(string connectionString)
     {
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -53,16 +60,30 @@ public class DaxExecutionService : IDaxExecutionService
     public async Task<QueryResult> ExecuteAsync(string connectionString, string dax)
     {
         var startTime = DateTime.UtcNow;
-
-        // Normalize connection string for Power BI Desktop
-        // If it's just "localhost:port" or "server:port", wrap it properly
         var normalizedConnectionString = NormalizeConnectionString(connectionString);
+        try
+        {
+            return await ExecuteCoreAsync(normalizedConnectionString, dax, startTime);
+        }
+        catch (Exception ex) when (ShouldRetryWithResolvedLocalPort(ex, normalizedConnectionString))
+        {
+            var retryConnectionString = await TryResolveActivePowerBiConnectionStringAsync(normalizedConnectionString);
+            if (string.IsNullOrWhiteSpace(retryConnectionString) || string.Equals(retryConnectionString, normalizedConnectionString, StringComparison.OrdinalIgnoreCase))
+            {
+                throw;
+            }
 
+            return await ExecuteCoreAsync(retryConnectionString, dax, startTime);
+        }
+    }
+
+    private static async Task<QueryResult> ExecuteCoreAsync(string normalizedConnectionString, string dax, DateTime startTime)
+    {
         using var conn = new AdomdConnection(normalizedConnectionString);
-        conn.Open(); // ADOMD doesn't support async Open
+        conn.Open();
 
         using var cmd = new AdomdCommand(dax, conn);
-        using var reader = cmd.ExecuteReader(); // ADOMD doesn't support async ExecuteReader
+        using var reader = cmd.ExecuteReader();
 
         var columns = new List<ColumnSchema>();
         var rows = new List<Dictionary<string, object?>>();
@@ -132,6 +153,206 @@ public class DaxExecutionService : IDaxExecutionService
             RowCount = rows.Count,
             ExecutionTimeMs = executionTime
         };
+    }
+
+    private static bool ShouldRetryWithResolvedLocalPort(Exception exception, string normalizedConnectionString)
+    {
+        var dataSource = TryGetConnectionProperty(normalizedConnectionString, "Data Source");
+        if (!TryParseLoopbackPort(dataSource, out _))
+        {
+            return false;
+        }
+
+        return EnumerateExceptions(exception).Any(ex => ex is System.Net.Sockets.SocketException socketEx && socketEx.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused)
+            || EnumerateExceptions(exception).Any(ex =>
+                ex.Message.Contains("无法建立连接", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("actively refused", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("connection refused", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IEnumerable<Exception> EnumerateExceptions(Exception exception)
+    {
+        for (var current = exception; current != null; current = current.InnerException!)
+        {
+            yield return current;
+            if (current.InnerException == null)
+            {
+                yield break;
+            }
+        }
+    }
+
+    private static bool TryParseLoopbackPort(string? dataSource, out int port)
+    {
+        port = 0;
+        if (string.IsNullOrWhiteSpace(dataSource))
+        {
+            return false;
+        }
+
+        var normalized = dataSource.Trim();
+        if (!normalized.StartsWith("localhost:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.StartsWith("127.0.0.1:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.StartsWith("[::1]:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.StartsWith("::1:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var portText = normalized[(normalized.LastIndexOf(':') + 1)..];
+        return int.TryParse(portText, out port);
+    }
+
+    private static string? TryGetConnectionProperty(string connectionString, string propertyName)
+    {
+        try
+        {
+            var builder = new DbConnectionStringBuilder
+            {
+                ConnectionString = connectionString
+            };
+
+            if (builder.TryGetValue(propertyName, out var value))
+            {
+                return value?.ToString();
+            }
+        }
+        catch
+        {
+            // Ignore malformed connection strings and fall back to the original error.
+        }
+
+        return null;
+    }
+
+    private static string ReplaceConnectionProperty(string connectionString, string propertyName, string propertyValue)
+    {
+        var builder = new DbConnectionStringBuilder
+        {
+            ConnectionString = connectionString
+        };
+        builder[propertyName] = propertyValue;
+        return builder.ConnectionString;
+    }
+
+    private static async Task<string?> TryResolveActivePowerBiConnectionStringAsync(string normalizedConnectionString)
+    {
+        var dataSource = TryGetConnectionProperty(normalizedConnectionString, "Data Source");
+        if (!TryParseLoopbackPort(dataSource, out var originalPort))
+        {
+            return null;
+        }
+
+        var activePorts = await ScanActivePowerBiPortsAsync();
+        if (activePorts.Count == 0 || activePorts.Contains(originalPort))
+        {
+            return null;
+        }
+
+        if (activePorts.Count != 1)
+        {
+            return null;
+        }
+
+        return ReplaceConnectionProperty(normalizedConnectionString, "Data Source", $"localhost:{activePorts[0]}");
+    }
+
+    private static async Task<IReadOnlyList<int>> ScanActivePowerBiPortsAsync()
+    {
+        if ((DateTimeOffset.UtcNow - _cachedPortScanAt) < TimeSpan.FromSeconds(5))
+        {
+            return _cachedPowerBiPorts;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            _cachedPortScanAt = DateTimeOffset.UtcNow;
+            _cachedPowerBiPorts = Array.Empty<int>();
+            return _cachedPowerBiPorts;
+        }
+
+        const string script = """
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$pbis = Get-Process -Name PBIDesktop -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | Select-Object Id
+$engines = Get-CimInstance Win32_Process -Filter "Name = 'msmdsrv.exe'" -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId
+$ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+  Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') } |
+  Select-Object LocalPort, OwningProcess
+$result = foreach ($pbi in $pbis) {
+  $children = @($engines | Where-Object { $_.ParentProcessId -eq $pbi.Id })
+  $ports |
+    Where-Object { $children.ProcessId -contains $_.OwningProcess } |
+    Select-Object -ExpandProperty LocalPort -Unique
+}
+$result | Sort-Object -Unique | ConvertTo-Json -Compress
+""";
+
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"").Replace(Environment.NewLine, "; ")}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+            {
+                return _cachedPowerBiPorts;
+            }
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var stdout = await stdoutTask;
+            _ = await stderrTask;
+
+            var parsedPorts = ParsePortsFromJson(stdout);
+            _cachedPortScanAt = DateTimeOffset.UtcNow;
+            _cachedPowerBiPorts = parsedPorts;
+            return _cachedPowerBiPorts;
+        }
+        catch
+        {
+            _cachedPortScanAt = DateTimeOffset.UtcNow;
+            _cachedPowerBiPorts = Array.Empty<int>();
+            return _cachedPowerBiPorts;
+        }
+    }
+
+    private static IReadOnlyList<int> ParsePortsFromJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Array.Empty<int>();
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind switch
+            {
+                JsonValueKind.Array => document.RootElement
+                    .EnumerateArray()
+                    .Where(element => element.TryGetInt32(out _))
+                    .Select(element => element.GetInt32())
+                    .Distinct()
+                    .ToArray(),
+                JsonValueKind.Number when document.RootElement.TryGetInt32(out var port) => new[] { port },
+                _ => Array.Empty<int>()
+            };
+        }
+        catch
+        {
+            return Array.Empty<int>();
+        }
     }
 
     public async Task<QueryResult> ExecuteBatchAsync(string connectionString, List<string> daxQueries)

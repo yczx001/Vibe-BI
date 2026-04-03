@@ -1,6 +1,6 @@
 import type { PageDefinition, QueryDefinition, DataSourceConfig } from '@vibe-bi/core';
 import { GridLayout, resolveGridLayout } from './GridLayout';
-import { ComponentBridge } from './ComponentBridge';
+import { ComponentBridge, type ChartRendererMode } from './ComponentBridge';
 import { useTheme } from '../theme/ThemeProvider';
 import { mixColors, withAlpha } from '../theme/colorUtils';
 
@@ -10,8 +10,10 @@ export interface PageRendererProps {
   dataSource: DataSourceConfig;
   pageIndex: number;
   apiBaseUrl?: string;
+  chartRendererMode?: ChartRendererMode;
   activeComponentId?: string;
   showInspectorActions?: boolean;
+  viewportMode?: 'contained' | 'document';
 }
 
 export function PageRenderer({
@@ -20,8 +22,10 @@ export function PageRenderer({
   dataSource,
   pageIndex: _pageIndex,
   apiBaseUrl,
+  chartRendererMode = 'html',
   activeComponentId,
   showInspectorActions = false,
+  viewportMode = 'contained',
 }: PageRendererProps) {
   const theme = useTheme();
   const layout = resolveGridLayout(page.layout);
@@ -47,9 +51,11 @@ export function PageRenderer({
       className="vibe-page"
       style={{
         width: '100%',
-        height: '100%',
-        overflow: 'auto',
+        height: viewportMode === 'document' ? 'auto' : '100%',
+        minHeight: viewportMode === 'document' ? '100%' : undefined,
+        overflow: viewportMode === 'document' ? 'visible' : 'hidden',
         padding: layout.padding,
+        boxSizing: 'border-box',
       }}
     >
       {/* Filters Bar */}
@@ -91,7 +97,7 @@ export function PageRenderer({
       )}
 
       {/* Grid Layout */}
-      <GridLayout layout={layout}>
+      <GridLayout layout={layout} fillHeight={viewportMode !== 'document'}>
         {components.map((component) => (
           <ComponentBridge
             key={component.id}
@@ -100,6 +106,7 @@ export function PageRenderer({
             dataSource={dataSource}
             pageFilters={filters}
             apiBaseUrl={apiBaseUrl}
+            chartRendererMode={chartRendererMode}
             isActive={activeComponentId === component.id}
             showInspectorActions={showInspectorActions}
           />

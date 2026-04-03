@@ -1,7 +1,13 @@
 import type {
+  BindingFieldSemanticRole,
   ChartType,
   ComponentDefinition,
+  DataSourceConfig,
+  PageDefinition,
+  QueryDefinition,
   QueryResult,
+  ReportDefinition,
+  ThemeDefinition,
 } from '@vibe-bi/core';
 
 export interface TableMetadata {
@@ -28,7 +34,37 @@ export interface ModelMetadata {
   relationships: unknown[];
 }
 
-export type WorkspaceMode = 'report' | 'data';
+export interface GitChangeSummary {
+  path: string;
+  originalPath?: string;
+  indexStatus: string;
+  workingTreeStatus: string;
+  staged: boolean;
+  unstaged: boolean;
+  statusLabel: string;
+}
+
+export interface GitRepositoryState {
+  rootPath: string;
+  branch: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  isClean: boolean;
+  changes: GitChangeSummary[];
+}
+
+export interface BrowserPreviewPayload {
+  report: ReportDefinition;
+  pages: PageDefinition[];
+  queries: QueryDefinition[];
+  theme?: ThemeDefinition | null;
+  dataSource: DataSourceConfig;
+  apiBaseUrl?: string;
+  chartRendererMode?: 'html' | 'echarts';
+}
+
+export type WorkspaceMode = 'report' | 'data' | 'git';
 export type DatasetCreationMode = 'library' | 'import-json' | 'custom-dax' | 'query-builder';
 export type DatasetImportMode = 'incremental' | 'replace';
 export type ImportedVisualCategory = 'display' | 'functional' | 'decorative' | 'custom';
@@ -39,8 +75,12 @@ export type QueryBuilderSelectionKind = 'column' | 'measure';
 
 export interface DatasetField {
   name: string;
+  label: string;
   dataType: string;
   isVisible: boolean;
+  isRecommended?: boolean;
+  isStructural?: boolean;
+  semanticRole?: BindingFieldSemanticRole;
 }
 
 export interface DatasetChart {
@@ -74,6 +114,7 @@ export interface ImportSummaryItem {
   fields: DatasetField[];
   charts: DatasetChart[];
   previewResult?: QueryResult;
+  evaluatePreviewResults?: Record<number, QueryResult>;
 }
 
 export interface CustomDatasetDraft {

@@ -3,6 +3,7 @@ import React from 'react';
 export type ShellIconName =
   | 'report-view'
   | 'data-view'
+  | 'git'
   | 'import'
   | 'custom-dax'
   | 'query-builder'
@@ -77,6 +78,17 @@ function renderIcon(name: ShellIconName) {
           <path d="M3.5 9H20.5" />
           <path d="M9 4.5V19.5" />
           <path d="M15 9V19.5" />
+        </>
+      );
+    case 'git':
+      return (
+        <>
+          <circle cx="7" cy="6.5" r="1.8" />
+          <circle cx="17" cy="12" r="1.8" />
+          <circle cx="7" cy="17.5" r="1.8" />
+          <path d="M8.8 7.3L15.3 11" />
+          <path d="M8.8 16.7L15.3 13" />
+          <path d="M7 8.3V15.7" />
         </>
       );
     case 'import':

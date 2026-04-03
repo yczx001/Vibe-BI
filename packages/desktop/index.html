@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vibe BI</title>
+    <script>
+      (() => {
+        const search = new URLSearchParams(window.location.search);
+        if (search.get('browser-preview') === '1') {
+          document.documentElement.dataset.browserPreview = '1';
+        }
+      })();
+    </script>
     <style>
       * {
         margin: 0;
@@ -13,7 +21,20 @@
       html, body, #root {
         width: 100%;
         height: 100%;
+      }
+      html:not([data-browser-preview='1']),
+      html:not([data-browser-preview='1']) body,
+      html:not([data-browser-preview='1']) #root {
         overflow: hidden;
+      }
+      html[data-browser-preview='1'],
+      html[data-browser-preview='1'] body {
+        overflow: auto;
+      }
+      html[data-browser-preview='1'] #root {
+        height: auto;
+        min-height: 100%;
+        overflow: visible;
       }
       body {
         font-family:
@@ -26,6 +47,9 @@
           sans-serif;
         background: #f7f4ee;
         color: #1f2329;
+      }
+      html[data-browser-preview='1'] body {
+        min-width: 0;
       }
       #boot-splash {
         position: fixed;

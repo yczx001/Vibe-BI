@@ -8,6 +8,10 @@ import type {
 } from '@vibe-bi/core';
 import { ThemeProvider } from '../theme/ThemeProvider';
 import { PageRenderer } from './PageRenderer';
+import { EditorialPageRenderer } from './EditorialPageRenderer';
+import { FreeformHtmlPageRenderer } from './FreeformHtmlPageRenderer';
+import { CreativeHtmlPageRenderer } from './CreativeHtmlPageRenderer';
+import type { ChartRendererMode } from './ComponentBridge';
 import { FilterProvider } from '../data/FilterContext';
 import { mixColors, withAlpha } from '../theme/colorUtils';
 
@@ -19,8 +23,10 @@ export interface ReportRendererProps {
   dataSource: DataSourceConfig;
   initialPage?: string;
   apiBaseUrl?: string;
+  chartRendererMode?: ChartRendererMode;
   activeComponentId?: string;
   showInspectorActions?: boolean;
+  viewportMode?: 'contained' | 'document';
 }
 
 export function ReportRenderer({
@@ -31,8 +37,10 @@ export function ReportRenderer({
   dataSource,
   initialPage,
   apiBaseUrl,
+  chartRendererMode = 'html',
   activeComponentId,
   showInspectorActions = false,
+  viewportMode = 'contained',
 }: ReportRendererProps) {
   // Debug logging
   React.useEffect(() => {
@@ -44,8 +52,9 @@ export function ReportRenderer({
       pageIds: Array.isArray(pages) ? pages.filter(Boolean).map((page) => page.id) : [],
       defaultPage: report?.defaultPage,
       dataSourceType: dataSource?.type,
+      chartRendererMode,
     });
-  }, [report, pages, queries, dataSource]);
+  }, [report, pages, queries, dataSource, chartRendererMode]);
 
   const safePages = useMemo(
     () => (Array.isArray(pages)
@@ -61,6 +70,13 @@ export function ReportRenderer({
   );
 
   const preferredPageId = initialPage || report.defaultPage || safePages[0]?.id || '';
+  const hasCreativeMarkup = safePages.some((page) => Boolean(page.html?.trim() || page.css?.trim() || page.js?.trim()));
+  const renderMode = report.renderMode
+    || (hasCreativeMarkup
+      ? 'creative-html'
+      : report.generationMode === 'ai-generated'
+        ? 'creative-html'
+        : 'grid');
   const [currentPageId, setCurrentPageId] = React.useState(preferredPageId);
 
   React.useEffect(() => {
@@ -122,7 +138,10 @@ export function ReportRenderer({
           className="vibe-report"
           style={{
             width: '100%',
-            height: '100%',
+            height: viewportMode === 'document' ? 'auto' : '100%',
+            minHeight: viewportMode === 'document' ? '100vh' : '100%',
+            display: 'flex',
+            flexDirection: 'column',
             background: `
               radial-gradient(circle at top right, ${withAlpha(theme.colors.secondary, 0.14)}, transparent 28%),
               radial-gradient(circle at top left, ${withAlpha(theme.colors.primary, 0.16)}, transparent 24%),
@@ -171,15 +190,51 @@ export function ReportRenderer({
           )}
 
           {/* Page Content */}
-          <PageRenderer
-            page={currentPage}
-            queries={queries}
-            dataSource={dataSource}
-            pageIndex={pageIndex}
-            apiBaseUrl={apiBaseUrl}
-            activeComponentId={activeComponentId}
-            showInspectorActions={showInspectorActions}
-          />
+          <div style={{ flex: '1 1 auto', minHeight: 0 }}>
+            {renderMode === 'creative-html' ? (
+              <CreativeHtmlPageRenderer
+                report={report}
+                page={currentPage}
+                queries={queries}
+                dataSource={dataSource}
+                theme={theme}
+                apiBaseUrl={apiBaseUrl}
+                viewportMode={viewportMode}
+              />
+            ) : renderMode === 'freeform-html' ? (
+              <FreeformHtmlPageRenderer
+                report={report}
+                page={currentPage}
+                queries={queries}
+                dataSource={dataSource}
+                theme={theme}
+                apiBaseUrl={apiBaseUrl}
+                viewportMode={viewportMode}
+              />
+            ) : renderMode === 'html-page' ? (
+              <EditorialPageRenderer
+                report={report}
+                page={currentPage}
+                queries={queries}
+                dataSource={dataSource}
+                theme={theme}
+                apiBaseUrl={apiBaseUrl}
+                viewportMode={viewportMode}
+              />
+            ) : (
+              <PageRenderer
+                page={currentPage}
+                queries={queries}
+                dataSource={dataSource}
+                pageIndex={pageIndex}
+                apiBaseUrl={apiBaseUrl}
+                chartRendererMode={chartRendererMode}
+                activeComponentId={activeComponentId}
+                showInspectorActions={showInspectorActions}
+                viewportMode={viewportMode}
+              />
+            )}
+          </div>
         </div>
       </FilterProvider>
     </ThemeProvider>

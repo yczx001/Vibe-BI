@@ -16,9 +16,18 @@ export interface ReportDefinition {
   createdAt: string;
   modifiedAt: string;
   generationMode?: 'ai-generated' | 'manual' | 'imported';
+  renderMode?: 'grid' | 'html-page' | 'freeform-html' | 'creative-html';
   pages: string[];
   defaultPage?: string;
   theme?: ThemeDefinition;
+  runtimeHints?: ReportRuntimeHints;
+}
+
+export interface ReportRuntimeHints {
+  filterPlacement?: 'top' | 'left' | 'right';
+  styleFamily?: string;
+  layoutArchetype?: string;
+  designTone?: string;
 }
 
 // ============================================================================
@@ -62,9 +71,23 @@ export interface MeasureSnapshot {
 export interface PageDefinition {
   id: string;
   name: string;
-  layout: LayoutConfig;
+  layout?: LayoutConfig;
   filters: FilterDefinition[];
   components: ComponentDefinition[];
+  html?: string;
+  css?: string;
+  js?: string;
+  template?: string;
+  stylesheet?: string;
+  script?: string;
+  bindings?: FreeformBindingDefinition[];
+  viewport?: CreativeViewportConfig;
+}
+
+export interface CreativeViewportConfig {
+  width?: number;
+  height?: number;
+  mode?: 'fixed' | 'responsive';
 }
 
 export interface LayoutConfig {
@@ -73,6 +96,54 @@ export interface LayoutConfig {
   rowHeight: number;
   gap: number;
   padding: number;
+}
+
+export type FreeformBindingKind = 'value' | 'metric' | 'table' | 'list' | 'chart' | 'text' | 'html';
+export type BindingFieldSemanticRole =
+  | 'dimension'
+  | 'category'
+  | 'measure'
+  | 'metric'
+  | 'date'
+  | 'text'
+  | 'identifier'
+  | 'structural'
+  | 'unknown';
+
+export interface BindingFieldSchema {
+  name: string;
+  label?: string;
+  dataType?: string;
+  semanticRole?: BindingFieldSemanticRole;
+  isRecommended?: boolean;
+  isStructural?: boolean;
+  isVisible?: boolean;
+}
+
+export interface FreeformBindingDefinition {
+  name: string;
+  kind: FreeformBindingKind;
+  queryRef?: string;
+  alias?: string;
+  field?: string;
+  fields?: string[];
+  categoryField?: string;
+  valueField?: string;
+  secondaryField?: string;
+  label?: string;
+  description?: string;
+  shapeHint?: 'rows' | 'value' | 'series' | 'matrix' | 'list';
+  columns?: string[];
+  schema?: BindingFieldSchema[];
+  recommendedFields?: string[];
+  structuralFields?: string[];
+  chartType?: ChartType;
+  orientation?: 'vertical' | 'horizontal';
+  limit?: number;
+  format?: ValueFormat;
+  emptyText?: string;
+  itemTemplate?: string;
+  className?: string;
 }
 
 // ============================================================================
@@ -140,6 +211,7 @@ export interface ChartConfig {
   series: SeriesConfig[];
   legend?: LegendConfig;
   tooltip?: TooltipConfig;
+  dataLabels?: DataLabelsConfig;
 }
 
 export interface AxisConfig {
@@ -166,6 +238,11 @@ export interface LegendConfig {
 export interface TooltipConfig {
   show?: boolean;
   trigger?: 'item' | 'axis';
+}
+
+export interface DataLabelsConfig {
+  show?: boolean;
+  position?: 'inside' | 'outside' | 'center';
 }
 
 // ============================================================================

@@ -1,6 +1,8 @@
 // Export engine components
 export { ReportRenderer } from './engine/ReportRenderer';
 export { PageRenderer } from './engine/PageRenderer';
+export { FreeformHtmlPageRenderer } from './engine/FreeformHtmlPageRenderer';
+export { CreativeHtmlPageRenderer } from './engine/CreativeHtmlPageRenderer';
 export { GridLayout, GridItem } from './engine/GridLayout';
 export { ComponentBridge } from './engine/ComponentBridge';
 
@@ -19,6 +21,7 @@ allComponents.forEach((component) => {
 
 // Export chart components
 export { EChartsWrapper } from './components/charts/EChartsWrapper';
+export { HtmlChartRenderer } from './components/charts/HtmlChartRenderer';
 
 // Export KPI components
 export { KpiCard } from './components/kpi/KpiCard';

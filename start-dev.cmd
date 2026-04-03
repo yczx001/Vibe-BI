@@ -21,6 +21,15 @@ if errorlevel 1 (
 echo [Vibe BI] Stopping stale backend processes...
 taskkill /F /IM VibeBi.Api.exe /T >nul 2>nul
 taskkill /F /IM VibeBi.Api /T >nul 2>nul
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$repo = (Resolve-Path '%~dp0').Path; " ^
+  "$targets = Get-CimInstance Win32_Process | Where-Object { " ^
+  "  ($_.Name -match 'node|electron') -and " ^
+  "  ($_.ExecutablePath -like ('*' + $repo + '*') -or $_.CommandLine -like ('*' + $repo + '*')) " ^
+  "} | Select-Object -ExpandProperty ProcessId; " ^
+  "$targets | Sort-Object -Descending -Unique"` ) do (
+  taskkill /F /PID %%I /T >nul 2>nul
+)
 
 echo [Vibe BI] Building backend...
 dotnet build "server\src\VibeBi.slnx"

@@ -10,9 +10,19 @@ public record ReportDefinition
     public DateTime CreatedAt { get; init; }
     public DateTime ModifiedAt { get; init; }
     public string? GenerationMode { get; init; }
+    public string? RenderMode { get; init; }
     public required List<string> Pages { get; init; } = new();
     public string? DefaultPage { get; init; }
     public ThemeDefinition? Theme { get; init; }
+    public ReportRuntimeHints? RuntimeHints { get; init; }
+}
+
+public record ReportRuntimeHints
+{
+    public string? FilterPlacement { get; init; }
+    public string? StyleFamily { get; init; }
+    public string? LayoutArchetype { get; init; }
+    public string? DesignTone { get; init; }
 }
 
 public record DataSourceConfig
@@ -55,6 +65,21 @@ public record PageDefinition
     public LayoutConfig? Layout { get; init; }
     public List<FilterDefinition> Filters { get; init; } = new();
     public required List<ComponentDefinition> Components { get; init; } = new();
+    public string? Html { get; init; }
+    public string? Css { get; init; }
+    public string? Js { get; init; }
+    public string? Template { get; init; }
+    public string? Stylesheet { get; init; }
+    public string? Script { get; init; }
+    public List<FreeformBindingDefinition> Bindings { get; init; } = new();
+    public CreativeViewportConfig? Viewport { get; init; }
+}
+
+public record CreativeViewportConfig
+{
+    public int? Width { get; init; }
+    public int? Height { get; init; }
+    public string? Mode { get; init; }
 }
 
 public record LayoutConfig
@@ -64,6 +89,44 @@ public record LayoutConfig
     public int RowHeight { get; init; } = 60;
     public int Gap { get; init; } = 16;
     public int Padding { get; init; } = 24;
+}
+
+public record FreeformBindingDefinition
+{
+    public required string Name { get; init; }
+    public required string Kind { get; init; }
+    public string? QueryRef { get; init; }
+    public string? Alias { get; init; }
+    public string? Field { get; init; }
+    public List<string> Fields { get; init; } = new();
+    public string? CategoryField { get; init; }
+    public string? ValueField { get; init; }
+    public string? SecondaryField { get; init; }
+    public string? Label { get; init; }
+    public string? Description { get; init; }
+    public string? ShapeHint { get; init; }
+    public List<string> Columns { get; init; } = new();
+    public List<BindingFieldSchema> Schema { get; init; } = new();
+    public List<string> RecommendedFields { get; init; } = new();
+    public List<string> StructuralFields { get; init; } = new();
+    public string? ChartType { get; init; }
+    public string? Orientation { get; init; }
+    public int? Limit { get; init; }
+    public ValueFormat? Format { get; init; }
+    public string? EmptyText { get; init; }
+    public string? ItemTemplate { get; init; }
+    public string? ClassName { get; init; }
+}
+
+public record BindingFieldSchema
+{
+    public required string Name { get; init; }
+    public string? Label { get; init; }
+    public string? DataType { get; init; }
+    public string? SemanticRole { get; init; }
+    public bool? IsRecommended { get; init; }
+    public bool? IsStructural { get; init; }
+    public bool? IsVisible { get; init; }
 }
 
 public record FilterDefinition
@@ -109,6 +172,16 @@ public record ComponentStyle
     public string? BackgroundColor { get; init; }
     public string? BorderRadius { get; init; }
     public string? BoxShadow { get; init; }
+}
+
+public record ValueFormat
+{
+    public required string Type { get; init; }
+    public string? Currency { get; init; }
+    public int? Decimals { get; init; }
+    public string? Prefix { get; init; }
+    public string? Suffix { get; init; }
+    public string? CustomFormat { get; init; }
 }
 
 public record QueryDefinition

@@ -15,11 +15,91 @@ interface UseQueryDataResult {
   refetch: () => void;
 }
 
+type CacheableQuery = Pick<QueryDefinition, 'id' | 'dax' | 'executionDax'>;
+
+interface PrimeQueryCacheOptions {
+  filters?: Record<string, unknown>;
+  dataSource?: DataSourceConfig;
+  dax?: string;
+  executionDax?: string;
+}
+
+interface CacheKeySet {
+  strict: string;
+  relaxed: string;
+}
+
+export interface FetchQueryRowsOptions {
+  query: CacheableQuery;
+  dataSource: DataSourceConfig;
+  filters?: Record<string, unknown>;
+  apiBaseUrl?: string;
+}
+
 // Simple cache
 const cache = new Map<string, { data: unknown[]; timestamp: number }>();
 
-function createCacheKey(queryId: string, filters?: Record<string, unknown>): string {
-  return `${queryId}-${JSON.stringify(filters)}`;
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+
+    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableSerialize(entryValue)}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function createCacheKeys(query: CacheableQuery, dataSource?: DataSourceConfig, filters?: Record<string, unknown>): CacheKeySet {
+  const relaxed = stableSerialize({
+    queryId: query.id,
+    dax: query.executionDax || query.dax || '',
+    filters: filters || {},
+  });
+
+  return {
+    strict: stableSerialize({
+      queryId: query.id,
+      dax: query.executionDax || query.dax || '',
+      server: dataSource?.connection?.server || '',
+      database: dataSource?.connection?.database || '',
+      filters: filters || {},
+    }),
+    relaxed,
+  };
+}
+
+function readCachedData(cacheKeys: CacheKeySet): { entry: { data: unknown[]; timestamp: number }; source: keyof CacheKeySet } | null {
+  const strictEntry = cache.get(cacheKeys.strict);
+  if (strictEntry) {
+    return { entry: strictEntry, source: 'strict' };
+  }
+
+  const relaxedEntry = cache.get(cacheKeys.relaxed);
+  if (relaxedEntry) {
+    return { entry: relaxedEntry, source: 'relaxed' };
+  }
+
+  return null;
+}
+
+function writeCachedData(cacheKeys: CacheKeySet, rows: unknown[]): void {
+  const entry = {
+    data: enrichRows(rows),
+    timestamp: Date.now(),
+  };
+
+  cache.set(cacheKeys.strict, entry);
+  cache.set(cacheKeys.relaxed, entry);
 }
 
 function enrichRows(rows: unknown[]): unknown[] {
@@ -81,20 +161,21 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const cacheKey = query ? createCacheKey(query.id, filters) : '';
-
   const fetchData = useCallback(async () => {
     if (!query) {
       setData([]);
       return;
     }
 
+    const activeCacheKeys = createCacheKeys(query, dataSource, filters);
+
     console.log('[useQueryData] Fetching data for query:', query.id);
 
     // Check cache
-    const cached = cache.get(cacheKey);
+    const cachedResult = readCachedData(activeCacheKeys);
+    const cached = cachedResult?.entry;
     if (cached && Date.now() - cached.timestamp < (query.cache?.ttl || 300) * 1000) {
-      console.log('[useQueryData] Using cached data for query:', query.id);
+      console.log('[useQueryData] Using cached data for query:', query.id, 'source:', cachedResult?.source, 'rows:', cached.data.length);
       setData(cached.data);
       return;
     }
@@ -103,88 +184,18 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
     setError(null);
 
     try {
-      // Build connection string for Analysis Services
-      // For Power BI Desktop, only Data Source is needed (no Initial Catalog)
-      const connectionString = dataSource.connection.server === 'mock'
-        ? 'mock'
-        : `Data Source=${dataSource.connection.server};`;
-
-      console.log('[useQueryData] Connection string:', connectionString);
-
-      // Mock mode - return mock data
-      if (connectionString === 'mock') {
-        let mockResult = mockData[query.id];
-
-        // Fallback: generate mock data based on query ID pattern
-        if (!mockResult) {
-          if (query.id.startsWith('q_')) {
-            // Generate sample data for imported queries (q_0, q_1, etc.)
-            const index = parseInt(query.id.replace('q_', ''), 10) || 0;
-            mockResult = generateMockDataForQuery(query.name || '', query.executionDax || query.dax || '', index);
-          } else {
-            mockResult = [];
-          }
-        }
-
-        const enrichedMockResult = enrichRows(mockResult);
-        console.log('[useQueryData] Using mock data for query:', query.id, 'rows:', enrichedMockResult.length);
-        setData(enrichedMockResult);
-        cache.set(cacheKey, { data: enrichedMockResult, timestamp: Date.now() });
-        setLoading(false);
-        return;
-      }
-
-      // Build DAX with filters
-      const dax = query.executionDax || query.dax;
-      if (filters && query.parameters) {
-        for (const param of query.parameters) {
-          if (param.filterRef && filters[param.filterRef]) {
-            // Apply filter to DAX (simplified)
-            // In real implementation, you'd need proper DAX manipulation
-          }
-        }
-      }
-
-      // Execute query via API
-      const baseUrl = apiBaseUrl || 'http://localhost:5000';
-      const response = await fetch(`${baseUrl}/api/query/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          connectionString,
-          dax,
-        }),
+      const enrichedRows = await fetchQueryRows({
+        query,
+        dataSource,
+        filters,
+        apiBaseUrl,
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        let detailedMessage = `Query failed: ${response.statusText}`;
-
-        if (errorText) {
-          try {
-            const parsed = JSON.parse(errorText) as { message?: string; dax?: string };
-            if (parsed.message) {
-              detailedMessage = parsed.message;
-            }
-          } catch {
-            detailedMessage = errorText;
-          }
-        }
-
-        throw new Error(detailedMessage);
-      }
-
-      const result: QueryResult = await response.json();
-      const enrichedRows = enrichRows(result.rows);
       console.log('[useQueryData] Data fetched for query:', query.id, 'rows:', enrichedRows.length);
       setData(enrichedRows);
-
-      // Cache result
-      cache.set(cacheKey, { data: enrichedRows, timestamp: Date.now() });
     } catch (err) {
       console.error('[useQueryData] Error fetching data for query:', query?.id, err);
       if (cached?.data) {
-        console.warn('[useQueryData] Falling back to stale cached data for query:', query?.id);
+        console.warn('[useQueryData] Falling back to stale cached data for query:', query?.id, 'source:', cachedResult?.source);
         setData(cached.data);
         setError(null);
       } else {
@@ -193,7 +204,7 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
     } finally {
       setLoading(false);
     }
-  }, [query, dataSource, cacheKey, filters, apiBaseUrl]);
+  }, [apiBaseUrl, dataSource, filters, query]);
 
   useEffect(() => {
     fetchData();
@@ -207,11 +218,111 @@ export function useQueryData({ query, dataSource, filters, apiBaseUrl }: UseQuer
   };
 }
 
-export function primeQueryCache(queryId: string, data: unknown[], filters?: Record<string, unknown>): void {
-  cache.set(createCacheKey(queryId, filters), {
-    data: enrichRows(data),
-    timestamp: Date.now(),
+export function primeQueryCache(queryOrId: CacheableQuery | string, data: unknown[], options?: PrimeQueryCacheOptions): void {
+  const query = typeof queryOrId === 'string'
+    ? {
+      id: queryOrId,
+      dax: options?.executionDax || options?.dax || '',
+      executionDax: options?.executionDax,
+    }
+    : queryOrId;
+
+  writeCachedData(createCacheKeys(query, options?.dataSource, options?.filters), data);
+}
+
+export async function fetchQueryRows({
+  query,
+  dataSource,
+  filters,
+  apiBaseUrl,
+}: FetchQueryRowsOptions): Promise<Record<string, unknown>[]> {
+  const activeCacheKeys = createCacheKeys(query, dataSource, filters);
+  const cachedResult = readCachedData(activeCacheKeys);
+  const cached = cachedResult?.entry;
+
+  if (cached && Date.now() - cached.timestamp < 300 * 1000) {
+    return cached.data as Record<string, unknown>[];
+  }
+
+  const connectionString = buildRuntimeConnectionString(dataSource);
+
+  console.log('[fetchQueryRows] Connection string:', connectionString);
+
+  if (connectionString === 'mock') {
+    let mockResult = mockData[query.id];
+
+    if (!mockResult) {
+      if (query.id.startsWith('q_')) {
+        const index = parseInt(query.id.replace('q_', ''), 10) || 0;
+        mockResult = generateMockDataForQuery(query.id, query.executionDax || query.dax || '', index);
+      } else {
+        mockResult = [];
+      }
+    }
+
+    const enrichedMockResult = enrichRows(mockResult);
+    writeCachedData(activeCacheKeys, enrichedMockResult);
+    return enrichedMockResult as Record<string, unknown>[];
+  }
+
+  const dax = query.executionDax || query.dax;
+  const baseUrl = apiBaseUrl || 'http://127.0.0.1:5000';
+  const response = await fetch(`${baseUrl}/api/query/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      connectionString,
+      dax,
+    }),
   });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let detailedMessage = `Query failed: ${response.statusText}`;
+
+    if (errorText) {
+      try {
+        const parsed = JSON.parse(errorText) as { message?: string };
+        if (parsed.message) {
+          detailedMessage = parsed.message;
+        }
+      } catch {
+        detailedMessage = errorText;
+      }
+    }
+
+    throw new Error(detailedMessage);
+  }
+
+  const result: QueryResult = await response.json();
+  const enrichedRows = enrichRows(result.rows) as Record<string, unknown>[];
+  writeCachedData(activeCacheKeys, enrichedRows);
+  return enrichedRows;
+}
+
+function buildRuntimeConnectionString(dataSource: DataSourceConfig): string {
+  const server = dataSource.connection.server?.trim() || '';
+  const database = dataSource.connection.database?.trim() || '';
+
+  if (!server) {
+    return '';
+  }
+
+  if (server === 'mock') {
+    return 'mock';
+  }
+
+  // Some callers pass a full connection string; preserve it and only backfill catalog when absent.
+  if (/[=;]/.test(server) && /data source|provider|initial catalog/i.test(server)) {
+    if (database && !/initial catalog\s*=/i.test(server)) {
+      return `${server.replace(/;*\s*$/, '')};Initial Catalog=${database};`;
+    }
+    return server;
+  }
+
+  return database
+    ? `Data Source=${server};Initial Catalog=${database};`
+    : `Data Source=${server};`;
 }
 
 // Clear cache utility
