@@ -1,5 +1,3 @@
-import React from 'react';
-
 export type ShellIconName =
   | 'report-view'
   | 'data-view'

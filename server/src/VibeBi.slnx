@@ -1,5 +1,4 @@
 <Solution>
-  <Project Path="VibeBi.AI/VibeBi.AI.csproj" />
   <Project Path="VibeBi.Api/VibeBi.Api.csproj" />
   <Project Path="VibeBi.Core/VibeBi.Core.csproj" />
 </Solution>

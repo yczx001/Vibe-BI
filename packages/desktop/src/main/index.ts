@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
+import * as net from 'net';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { execFile, spawn, ChildProcess } from 'child_process';
 import { promises as fs } from 'fs';
 import { format, promisify } from 'util';
@@ -10,7 +12,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let dotnetProcess: ChildProcess | null = null;
 let apiPort: number = 0;
+let agentProcess: ChildProcess | null = null;
+let agentPort: number = 0;
+let browserPreviewServer: Server | null = null;
+let browserPreviewPort: number = 0;
+const browserPreviewEntries = new Map<string, { payload: string; createdAt: number }>();
 const execFileAsync = promisify(execFile);
+const BROWSER_PREVIEW_TTL_MS = 30 * 60 * 1000;
 
 function isIgnorablePipeError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
@@ -41,6 +49,14 @@ function logInfo(...args: unknown[]) {
 
 function logError(...args: unknown[]) {
   writeLog(process.stderr, args);
+}
+
+function cleanupBrowserPreviewEntries(now = Date.now()) {
+  for (const [key, entry] of browserPreviewEntries.entries()) {
+    if (now - entry.createdAt > BROWSER_PREVIEW_TTL_MS) {
+      browserPreviewEntries.delete(key);
+    }
+  }
 }
 
 process.stdout?.on('error', (error) => {
@@ -83,30 +99,30 @@ type BackendLaunchConfig = {
   cwd: string;
 };
 
-function getAiConversationStatePath(): string {
-  if (app.isPackaged) {
-    return path.join(app.getPath('userData'), 'logs', 'ai-conversations', 'latest.json');
-  }
+type PythonLaunchConfig = {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+};
 
-  return path.join(__dirname, '..', '..', '..', '..', '.codex-logs', 'ai-conversations', 'latest.json');
-}
+type PersistedAiSettings = {
+  provider: 'anthropic' | 'openai';
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  maxRepairRounds: number;
+  traceVerbosity: 'summary' | 'detailed';
+};
 
-async function readOptionalTextFile(filePath: string): Promise<string | null> {
-  try {
-    const buffer = await fs.readFile(filePath);
-    return decodeTextFile(buffer);
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error
-      ? String((error as { code?: unknown }).code)
-      : '';
-
-    if (code === 'ENOENT') {
-      return null;
-    }
-
-    throw error;
-  }
-}
+const defaultAiSettings: PersistedAiSettings = {
+  provider: 'anthropic',
+  baseUrl: '',
+  apiKey: '',
+  model: '',
+  maxRepairRounds: 2,
+  traceVerbosity: 'detailed',
+};
 
 function decodeTextFile(buffer: Buffer): string {
   if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
@@ -124,6 +140,56 @@ function decodeTextFile(buffer: Buffer): string {
   }
 
   return buffer.toString('utf8');
+}
+
+function getAiSettingsFilePath(): string {
+  return path.join(app.getPath('userData'), 'ai-settings.json');
+}
+
+function normalizeAiSettings(input: unknown): PersistedAiSettings {
+  const record = input && typeof input === 'object'
+    ? input as Partial<PersistedAiSettings>
+    : {};
+
+  const provider = record.provider === 'openai' ? 'openai' : 'anthropic';
+  const traceVerbosity = record.traceVerbosity === 'summary' ? 'summary' : 'detailed';
+  const maxRepairRoundsRaw = Number(record.maxRepairRounds);
+  const maxRepairRounds = Number.isFinite(maxRepairRoundsRaw)
+    ? Math.max(0, Math.min(6, Math.round(maxRepairRoundsRaw)))
+    : defaultAiSettings.maxRepairRounds;
+
+  return {
+    provider,
+    baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : '',
+    apiKey: typeof record.apiKey === 'string' ? record.apiKey : '',
+    model: typeof record.model === 'string' ? record.model : '',
+    maxRepairRounds,
+    traceVerbosity,
+  };
+}
+
+async function loadAiSettings(): Promise<PersistedAiSettings> {
+  const settingsPath = getAiSettingsFilePath();
+
+  try {
+    const content = await fs.readFile(settingsPath, 'utf8');
+    return normalizeAiSettings(JSON.parse(content));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      return { ...defaultAiSettings };
+    }
+
+    logError('[Electron] Failed to load AI settings:', error);
+    return { ...defaultAiSettings };
+  }
+}
+
+async function saveAiSettings(settings: unknown): Promise<PersistedAiSettings> {
+  const normalized = normalizeAiSettings(settings);
+  const settingsPath = getAiSettingsFilePath();
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, JSON.stringify(normalized, null, 2), 'utf8');
+  return normalized;
 }
 
 async function resolveBackendLaunch(): Promise<BackendLaunchConfig> {
@@ -153,6 +219,251 @@ async function resolveBackendLaunch(): Promise<BackendLaunchConfig> {
     args: [dllPath, '--urls', 'http://127.0.0.1:0'],
     cwd: backendDir,
   };
+}
+
+function resolveWorkspaceRoot(): string {
+  return app.isPackaged
+    ? process.resourcesPath
+    : path.join(__dirname, '..', '..', '..', '..');
+}
+
+async function findAvailablePort(preferredPort?: number): Promise<number> {
+  const tryListen = (port: number) => new Promise<number>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      const address = server.address();
+      const resolvedPort = typeof address === 'object' && address ? address.port : port;
+      server.close((closeError) => {
+        if (closeError) {
+          reject(closeError);
+          return;
+        }
+        resolve(resolvedPort);
+      });
+    });
+  });
+
+  if (preferredPort && preferredPort > 0) {
+    try {
+      return await tryListen(preferredPort);
+    } catch {
+      // Fall back to dynamic port allocation.
+    }
+  }
+
+  return tryListen(0);
+}
+
+async function resolveAgentLaunch(port: number): Promise<PythonLaunchConfig> {
+  const workspaceRoot = resolveWorkspaceRoot();
+  const agentDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'agents', 'langgraph_sidecar')
+    : path.join(workspaceRoot, 'agents', 'langgraph_sidecar');
+  const agentSourceDir = path.join(agentDir, 'src');
+  const localVenvPython = process.platform === 'win32'
+    ? path.join(agentDir, '.venv', 'Scripts', 'python.exe')
+    : path.join(agentDir, '.venv', 'bin', 'python');
+  const packagedPython = process.platform === 'win32'
+    ? path.join(process.resourcesPath, 'python', 'python.exe')
+    : path.join(process.resourcesPath, 'python', 'bin', 'python3');
+
+  const candidateCommands = [
+    process.env.VIBE_BI_PYTHON || '',
+    localVenvPython,
+    app.isPackaged ? packagedPython : '',
+    'python',
+    process.platform === 'win32' ? 'py' : '',
+  ].filter(Boolean);
+
+  let selectedCommand = candidateCommands[0];
+  for (const candidate of candidateCommands) {
+    if (candidate === 'python' || candidate === 'py') {
+      selectedCommand = candidate;
+      break;
+    }
+
+    try {
+      await fs.access(candidate);
+      selectedCommand = candidate;
+      break;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  const baseArgs = selectedCommand === 'py' ? ['-3'] : [];
+  const args = [
+    ...baseArgs,
+    '-m',
+    'vibe_bi_agent.main',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    String(port),
+  ];
+
+  return {
+    command: selectedCommand,
+    args,
+    cwd: agentDir,
+    env: {
+      ...process.env,
+      PYTHONPATH: [agentSourceDir, process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter),
+    },
+  };
+}
+
+async function waitForHttpHealthy(url: string, timeoutMs = 20000): Promise<void> {
+  const startedAt = Date.now();
+  let lastError: unknown = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Timeout waiting for service health at ${url}`);
+}
+
+function setBrowserPreviewCorsHeaders(response: ServerResponse) {
+  response.setHeader('Access-Control-Allow-Origin', '*');
+  response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  response.setHeader('Cache-Control', 'no-store');
+}
+
+function handleBrowserPreviewRequest(request: IncomingMessage, response: ServerResponse) {
+  setBrowserPreviewCorsHeaders(response);
+
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204);
+    response.end();
+    return;
+  }
+
+  const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
+  const previewMatch = requestUrl.pathname.match(/^\/api\/browser-preview\/([^/]+)$/);
+  if (request.method === 'GET' && previewMatch) {
+    cleanupBrowserPreviewEntries();
+    const entry = browserPreviewEntries.get(previewMatch[1]);
+    if (!entry) {
+      response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      response.end(JSON.stringify({ error: 'Preview not found or expired.' }));
+      return;
+    }
+
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    response.end(entry.payload);
+    return;
+  }
+
+  if (request.method === 'GET' && requestUrl.pathname === '/health') {
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    response.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+  response.end(JSON.stringify({ error: 'Not found' }));
+}
+
+async function ensureBrowserPreviewServer(): Promise<number> {
+  if (browserPreviewServer && browserPreviewPort) {
+    return browserPreviewPort;
+  }
+
+  const port = await findAvailablePort();
+  return new Promise((resolve, reject) => {
+    const server = createServer((request, response) => {
+      try {
+        handleBrowserPreviewRequest(request, response);
+      } catch (error) {
+        logError('[Electron] Browser preview request failed:', error);
+        if (!response.headersSent) {
+          response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        }
+        response.end(JSON.stringify({ error: 'Internal preview error' }));
+      }
+    });
+
+    server.once('error', (error) => {
+      reject(error);
+    });
+
+    server.listen(port, '127.0.0.1', () => {
+      browserPreviewServer = server;
+      browserPreviewPort = port;
+      logInfo('[Electron] Browser preview server started on port:', port);
+      resolve(port);
+    });
+  });
+}
+
+function stopBrowserPreviewServer() {
+  if (!browserPreviewServer) {
+    browserPreviewPort = 0;
+    browserPreviewEntries.clear();
+    return;
+  }
+
+  try {
+    browserPreviewServer.close();
+  } catch (error) {
+    logError('[Electron] Failed to stop browser preview server:', error);
+  }
+
+  browserPreviewServer = null;
+  browserPreviewPort = 0;
+  browserPreviewEntries.clear();
+}
+
+function buildBrowserPreviewDocumentUrl(previewId: string, previewPortValue: number): string {
+  const previewDataUrl = `http://127.0.0.1:${previewPortValue}/api/browser-preview/${previewId}`;
+
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+    devUrl.searchParams.set('browser-preview', '1');
+    devUrl.searchParams.set('preview-url', previewDataUrl);
+    return devUrl.toString();
+  }
+
+  const rendererIndexPath = path.join(__dirname, '../renderer/index.html');
+  const fileUrl = pathToFileURL(rendererIndexPath);
+  fileUrl.searchParams.set('browser-preview', '1');
+  fileUrl.searchParams.set('preview-url', previewDataUrl);
+  return fileUrl.toString();
+}
+
+async function openBrowserPreview(payload: unknown): Promise<string> {
+  const serializedPayload = JSON.stringify(payload ?? {});
+  const previewPortValue = await ensureBrowserPreviewServer();
+  const previewId = `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  cleanupBrowserPreviewEntries();
+  browserPreviewEntries.set(previewId, {
+    payload: serializedPayload,
+    createdAt: Date.now(),
+  });
+
+  const previewUrl = buildBrowserPreviewDocumentUrl(previewId, previewPortValue);
+  await shell.openExternal(previewUrl);
+  return previewUrl;
 }
 
 async function startDotNetBackend(): Promise<number> {
@@ -231,6 +542,56 @@ function stopDotNetBackend() {
     logInfo('[Electron] Stopping .NET backend...');
     dotnetProcess.kill();
     dotnetProcess = null;
+  }
+}
+
+export function getAgentBaseUrl(): string {
+  return agentPort > 0 ? `http://127.0.0.1:${agentPort}` : '';
+}
+
+async function startAgentSidecar(): Promise<string> {
+  const port = await findAvailablePort(8797);
+  const launch = await resolveAgentLaunch(port);
+  agentPort = 0;
+
+  logInfo('[Electron] Starting AI sidecar:', launch.command, launch.args.join(' '));
+  agentProcess = spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  agentProcess.stdout?.on('data', (data: Buffer) => {
+    logInfo('[AI Agent]', data.toString());
+  });
+
+  agentProcess.stderr?.on('data', (data: Buffer) => {
+    logError('[AI Agent Error]', data.toString());
+  });
+
+  agentProcess.on('exit', (code) => {
+    logInfo(`[Electron] AI sidecar exited with code ${code}`);
+    agentProcess = null;
+    agentPort = 0;
+  });
+
+  agentProcess.on('error', (error) => {
+    logError('[Electron] Failed to start AI sidecar:', error);
+  });
+
+  await waitForHttpHealthy(`http://127.0.0.1:${port}/health`, 25000);
+  agentPort = port;
+  logInfo('[Electron] AI sidecar started on port:', agentPort);
+  return getAgentBaseUrl();
+}
+
+function stopAgentSidecar() {
+  if (agentProcess) {
+    logInfo('[Electron] Stopping AI sidecar...');
+    agentProcess.kill();
+    agentProcess = null;
+    agentPort = 0;
   }
 }
 
@@ -326,6 +687,14 @@ async function createWindow() {
     return;
   }
 
+  try {
+    await startAgentSidecar();
+  } catch (err) {
+    logError('[Electron] Failed to start AI sidecar:', err);
+    agentProcess = null;
+    agentPort = 0;
+  }
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -369,6 +738,8 @@ async function createWindow() {
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
+  stopBrowserPreviewServer();
+  stopAgentSidecar();
   stopDotNetBackend();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -382,12 +753,26 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
+  stopBrowserPreviewServer();
+  stopAgentSidecar();
   stopDotNetBackend();
 });
 
 // IPC handlers
 ipcMain.handle('get-api-url', () => {
   return getApiBaseUrl();
+});
+
+ipcMain.handle('get-agent-url', () => {
+  return getAgentBaseUrl();
+});
+
+ipcMain.handle('load-ai-settings', async () => {
+  return loadAiSettings();
+});
+
+ipcMain.handle('save-ai-settings', async (_, settings: unknown) => {
+  return saveAiSettings(settings);
 });
 
 ipcMain.handle('select-file', async (_, options?: SelectFileOptions) => {
@@ -424,17 +809,6 @@ ipcMain.handle('scan-powerbi-instances', async () => {
   return scanPowerBiInstances();
 });
 
-ipcMain.handle('get-ai-conversation-path', () => {
-  return getAiConversationStatePath();
-});
-
-ipcMain.handle('read-ai-conversation-state', async () => {
-  return readOptionalTextFile(getAiConversationStatePath());
-});
-
-ipcMain.handle('write-ai-conversation-state', async (_, content: string) => {
-  const targetPath = getAiConversationStatePath();
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.writeFile(targetPath, content, 'utf8');
-  return targetPath;
+ipcMain.handle('open-browser-preview', async (_, payload: unknown) => {
+  return openBrowserPreview(payload);
 });

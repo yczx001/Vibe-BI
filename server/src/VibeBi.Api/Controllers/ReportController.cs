@@ -28,8 +28,7 @@ public class ReportController : ControllerBase
                 DataSource = request.DataSource,
                 Pages = request.Pages,
                 Queries = request.Queries,
-                Theme = request.Theme,
-                AiContext = request.AiContext
+                Theme = request.Theme
             };
 
             var tempPath = Path.Combine(Path.GetTempPath(), $"{request.Manifest.Id}.vbi");
@@ -67,7 +66,6 @@ public record SaveReportRequest
     public required List<PageDefinition> Pages { get; init; }
     public required List<QueryDefinition> Queries { get; init; }
     public required ThemeDefinition Theme { get; init; }
-    public object? AiContext { get; init; }
 }
 
 public record OpenReportRequest

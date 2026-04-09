@@ -150,10 +150,10 @@ const SHIPPING_REPORT_STYLES = `
 
 .vibe-shipping-page__inner {
   width: min(1580px, calc(100% - 48px));
-  margin: 26px auto 0;
-  padding-bottom: 42px;
+  margin: 0 auto;
+  padding-bottom: 32px;
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .vibe-shipping-page__inner--filters-left,
@@ -173,16 +173,19 @@ const SHIPPING_REPORT_STYLES = `
   grid-column: 1;
 }
 
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-side-rail {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  position: sticky;
+  top: 20px;
+  z-index: 2;
+}
+
 .vibe-shipping-page__inner--filters-left > .vibe-shipping-topbar,
 .vibe-shipping-page__inner--filters-left > .vibe-shipping-metric-grid,
 .vibe-shipping-page__inner--filters-left > .vibe-shipping-main-grid,
 .vibe-shipping-page__inner--filters-left > .vibe-shipping-panel,
 .vibe-shipping-page__inner--filters-left > .vibe-shipping-detail-panel {
-  grid-column: 2;
-}
-
-.vibe-shipping-page__inner--filters-right > .vibe-shipping-filter-bar,
-.vibe-shipping-page__inner--filters-right > .vibe-shipping-filter-pills {
   grid-column: 2;
 }
 
@@ -194,10 +197,33 @@ const SHIPPING_REPORT_STYLES = `
   grid-column: 1;
 }
 
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-topbar {
+  grid-row: 1;
+}
+
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-metric-grid {
+  grid-row: 2;
+}
+
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-main-grid {
+  grid-row: 3;
+}
+
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-panel {
+  grid-row: 4;
+}
+
+.vibe-shipping-page__inner--filters-right > .vibe-shipping-detail-panel {
+  grid-row: 5;
+}
+
 .vibe-shipping-page__inner--filters-left .vibe-shipping-filter-bar,
 .vibe-shipping-page__inner--filters-right .vibe-shipping-filter-bar {
   grid-template-columns: 1fr;
   align-content: start;
+}
+
+.vibe-shipping-page__inner--filters-left .vibe-shipping-filter-bar {
   position: sticky;
   top: 20px;
   z-index: 2;
@@ -277,23 +303,138 @@ const SHIPPING_REPORT_STYLES = `
   font-size: 25px;
 }
 
+.vibe-shipping-side-rail {
+  position: relative;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+  color: white;
+  border-radius: 30px;
+  border: 1px solid var(--ship-panel-line);
+  box-shadow: 0 18px 42px var(--ship-shadow);
+  backdrop-filter: blur(var(--ship-blur));
+  background:
+    linear-gradient(180deg, var(--ship-brief-top), var(--ship-brief-bottom)),
+    radial-gradient(circle at top right, var(--ship-brief-glow), transparent 38%);
+  overflow: hidden;
+}
+
+.vibe-shipping-side-rail::after {
+  content: "";
+  position: absolute;
+  inset: auto -50px -64px auto;
+  width: 220px;
+  height: 220px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.vibe-shipping-rail-kicker {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.68);
+  font-weight: 700;
+}
+
+.vibe-shipping-rail-title {
+  margin: 6px 0 0;
+  font-family: var(--ship-font-display);
+  font-size: 30px;
+  line-height: 0.95;
+  letter-spacing: -0.05em;
+}
+
+.vibe-shipping-rail-subline {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: rgba(255,255,255,0.76);
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-bar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-card {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: none;
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-label,
+.vibe-shipping-side-rail .vibe-shipping-filter-caption {
+  color: rgba(255,255,255,0.72);
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-control {
+  background: rgba(15, 33, 53, 0.36);
+  border-color: rgba(255,255,255,0.12);
+  color: white;
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-pills {
+  gap: 8px;
+}
+
+.vibe-shipping-side-rail .vibe-shipping-filter-pill {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.12);
+  color: white;
+}
+
+.vibe-shipping-rail-stats {
+  display: grid;
+  gap: 10px;
+}
+
+.vibe-shipping-rail-stat {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.vibe-shipping-rail-stat-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.64);
+}
+
+.vibe-shipping-rail-stat-value {
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.vibe-shipping-rail-stat-note {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255,255,255,0.72);
+}
+
 .vibe-shipping-card {
   background: var(--ship-panel);
   border: 1px solid var(--ship-panel-line);
   border-radius: 30px;
-  box-shadow: 0 24px 60px var(--ship-shadow);
-  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 42px var(--ship-shadow);
+  backdrop-filter: blur(var(--ship-blur));
 }
 
 .vibe-shipping-topbar {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(440px, 0.9fr);
-  gap: 18px;
+  grid-template-columns: minmax(0, 1.28fr) minmax(400px, 0.82fr);
+  gap: 12px;
   align-items: stretch;
 }
 
 .vibe-shipping-masthead {
-  padding: 28px 30px;
+  padding: 20px 22px;
   background:
     linear-gradient(135deg, var(--ship-panel-strong), var(--ship-panel-soft)),
     radial-gradient(circle at 100% 0%, var(--ship-accent-glow), transparent 38%);
@@ -337,23 +478,23 @@ const SHIPPING_REPORT_STYLES = `
 }
 
 .vibe-shipping-title {
-  margin: 18px 0 0;
+  margin: 14px 0 0;
   font-family: var(--ship-font-display);
-  font-size: clamp(34px, 4.2vw, 64px);
-  line-height: 0.96;
+  font-size: clamp(28px, 3.4vw, 50px);
+  line-height: 0.98;
   letter-spacing: -0.05em;
 }
 
 .vibe-shipping-summary-line {
-  margin-top: 18px;
+  margin-top: 12px;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .vibe-shipping-summary-item {
-  padding: 14px 14px 12px;
-  border-radius: 18px;
+  padding: 10px 12px 10px;
+  border-radius: 16px;
   background: var(--ship-panel-soft);
   border: 1px solid var(--ship-line);
 }
@@ -366,14 +507,14 @@ const SHIPPING_REPORT_STYLES = `
 }
 
 .vibe-shipping-summary-value {
-  margin-top: 8px;
-  font-size: 24px;
+  margin-top: 6px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.04em;
 }
 
 .vibe-shipping-briefing {
-  padding: 26px 26px 22px;
+  padding: 18px 18px 16px;
   background:
     linear-gradient(180deg, var(--ship-brief-top), var(--ship-brief-bottom)),
     radial-gradient(circle at top right, var(--ship-brief-glow), transparent 36%);
@@ -393,66 +534,66 @@ const SHIPPING_REPORT_STYLES = `
 }
 
 .vibe-shipping-kicker {
-  font-size: 12px;
-  letter-spacing: 0.18em;
+  font-size: 11px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: rgba(255,255,255,0.68);
   font-weight: 700;
 }
 
 .vibe-shipping-headline {
-  margin-top: 10px;
+  margin-top: 8px;
   font-family: var(--ship-font-display);
-  font-size: clamp(44px, 5vw, 82px);
-  line-height: 0.9;
+  font-size: clamp(36px, 4.1vw, 64px);
+  line-height: 0.92;
   letter-spacing: -0.07em;
 }
 
 .vibe-shipping-subline {
-  margin-top: 8px;
+  margin-top: 6px;
   color: rgba(255,255,255,0.76);
-  font-size: 15px;
+  font-size: 13px;
 }
 
 .vibe-shipping-insight-list {
-  margin: 18px 0 0;
+  margin: 14px 0 0;
   padding: 0;
   list-style: none;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .vibe-shipping-insight-list li {
-  padding: 12px 14px;
+  padding: 9px 11px;
   border-radius: 16px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: var(--ship-brief-card-bg);
+  border: 1px solid var(--ship-brief-card-line);
   color: rgba(255,255,255,0.9);
-  line-height: 1.55;
+  line-height: 1.4;
 }
 
 .vibe-shipping-metric-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .vibe-shipping-filter-bar {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .vibe-shipping-filter-card {
-  padding: 14px 16px;
+  padding: 10px 12px;
   display: grid;
-  gap: 10px;
+  gap: 6px;
   background: var(--ship-panel-soft);
 }
 
 .vibe-shipping-filter-label {
   color: var(--ship-muted);
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 700;
@@ -461,19 +602,20 @@ const SHIPPING_REPORT_STYLES = `
 .vibe-shipping-filter-control {
   width: 100%;
   border: 1px solid var(--ship-line);
-  border-radius: 14px;
-  background: rgba(255,255,255,0.86);
+  border-radius: 12px;
+  background: var(--ship-control-bg);
   color: var(--ship-ink);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 10px 12px;
+  padding: 8px 10px;
   outline: none;
 }
 
 .vibe-shipping-filter-caption {
   color: var(--ship-muted);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 10px;
+  line-height: 1.4;
+  opacity: 0.84;
 }
 
 .vibe-shipping-filter-pills {
@@ -488,7 +630,7 @@ const SHIPPING_REPORT_STYLES = `
   gap: 8px;
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.72);
+  background: var(--ship-pill-bg);
   border: 1px solid var(--ship-line);
   color: var(--ship-navy);
   font-size: 12px;
@@ -496,7 +638,7 @@ const SHIPPING_REPORT_STYLES = `
 }
 
 .vibe-shipping-metric-card {
-  padding: 18px 18px 16px;
+  padding: 16px 16px 14px;
   background: var(--ship-panel-soft);
   position: relative;
   overflow: hidden;
@@ -519,24 +661,24 @@ const SHIPPING_REPORT_STYLES = `
 }
 
 .vibe-shipping-metric-value {
-  margin-top: 10px;
+  margin-top: 8px;
   font-family: var(--ship-font-display);
-  font-size: 34px;
+  font-size: 31px;
   line-height: 1;
   letter-spacing: -0.05em;
 }
 
 .vibe-shipping-metric-note {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--ship-muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
 .vibe-shipping-main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(380px, 0.95fr);
-  gap: 18px;
+  gap: 14px;
   align-items: start;
 }
 
@@ -806,6 +948,7 @@ const SHIPPING_REPORT_STYLES = `
     grid-template-columns: 1fr;
   }
 
+  .vibe-shipping-page__inner--filters-right > .vibe-shipping-side-rail,
   .vibe-shipping-page__inner--filters-left > .vibe-shipping-filter-bar,
   .vibe-shipping-page__inner--filters-left > .vibe-shipping-filter-pills,
   .vibe-shipping-page__inner--filters-left > .vibe-shipping-topbar,
@@ -926,7 +1069,13 @@ function normalizeStyleFamily(value?: string | null): string | null {
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized.includes('shipping') || normalized.includes('航运')) {
+  if (
+    normalized.includes('shipping')
+    || normalized.includes('航运')
+    || normalized.includes('boardroom')
+    || normalized.includes('editorial')
+    || normalized.includes('海运')
+  ) {
     return 'shipping-ops';
   }
 
@@ -1054,25 +1203,68 @@ export function ShippingEditorialPageRenderer({
     const gold = theme.colors.secondary || '#d2a645';
     const navy = mixColors(text, '#12395a', 0.65, '#12395a');
     const teal = mixColors(cyan, '#11a28b', 0.55, '#11a28b');
+    const isLightMode = !isDarkColor(background);
+    const panelBase = isLightMode
+      ? mixColors(surface, background, 0.9, surface)
+      : mixColors(surface, background, 0.88, surface);
+    const panelStrong = isLightMode
+      ? mixColors('#ffffff', surface, 0.94, '#ffffff')
+      : mixColors(surface, background, 0.94, surface);
+    const panelSoft = isLightMode
+      ? mixColors(surface, background, 0.82, surface)
+      : mixColors(surface, background, 0.82, surface);
+    const panelLine = isLightMode
+      ? withAlpha(text, 0.08, 'rgba(15,23,42,0.08)')
+      : withAlpha(text, 0.12, 'rgba(232,238,242,0.12)');
+    const controlBg = isLightMode
+      ? mixColors('#ffffff', background, 0.9, '#ffffff')
+      : mixColors(surface, background, 0.8, surface);
+    const pillBg = isLightMode
+      ? mixColors(surface, background, 0.86, surface)
+      : mixColors(surface, background, 0.76, surface);
+    const chartTop = isLightMode
+      ? mixColors(surface, '#edf3f8', 0.72, surface)
+      : mixColors(surface, background, 0.84, surface);
+    const chartBottom = isLightMode
+      ? mixColors(surface, background, 0.9, surface)
+      : mixColors(surface, background, 0.78, surface);
+    const stickyCell = isLightMode
+      ? mixColors(surface, background, 0.92, surface)
+      : mixColors(surface, background, 0.9, surface);
+    const briefTop = isLightMode
+      ? mixColors(navy, '#12395a', 0.92, '#12395a')
+      : mixColors(navy, '#0b2238', 0.82, '#0b2238');
+    const briefBottom = isLightMode
+      ? mixColors(navy, '#174a67', 0.88, '#174a67')
+      : mixColors(navy, '#102d47', 0.78, '#102d47');
+    const briefGlow = isLightMode
+      ? withAlpha(teal, 0.22, 'rgba(17,162,139,0.22)')
+      : withAlpha(teal, 0.12, 'rgba(17,162,139,0.12)');
+    const briefCardBg = isLightMode
+      ? withAlpha('#ffffff', 0.08, 'rgba(255,255,255,0.08)')
+      : withAlpha('#0f2135', 0.72, 'rgba(15,33,53,0.72)');
+    const briefCardLine = isLightMode
+      ? withAlpha('#ffffff', 0.08, 'rgba(255,255,255,0.08)')
+      : withAlpha('#8ba4c7', 0.12, 'rgba(139,164,199,0.12)');
 
     return {
       '--ship-bg-top': mixColors(background, '#ffffff', 0.84, background),
       '--ship-bg-mid': mixColors(background, '#edf3f8', 0.9, background),
       '--ship-bg-bottom': mixColors(background, '#e8eff5', 0.92, background),
-      '--ship-panel': withAlpha(surface, 0.86, surface),
-      '--ship-panel-strong': withAlpha('#ffffff', 0.96, '#ffffff'),
-      '--ship-panel-soft': withAlpha('#ffffff', 0.72, '#ffffff'),
-      '--ship-panel-line': withAlpha('#ffffff', 0.9, '#ffffff'),
+      '--ship-panel': panelBase,
+      '--ship-panel-strong': panelStrong,
+      '--ship-panel-soft': panelSoft,
+      '--ship-panel-line': panelLine,
       '--ship-line': withAlpha(text, 0.09, 'rgba(15,23,42,0.09)'),
       '--ship-grid-line': withAlpha(navy, 0.035, 'rgba(18,57,90,0.035)'),
       '--ship-row-line': withAlpha(text, 0.06, 'rgba(15,23,42,0.06)'),
       '--ship-row-hover': withAlpha(teal, 0.04, 'rgba(17,162,139,0.04)'),
       '--ship-track': withAlpha(navy, 0.08, 'rgba(18,57,90,0.08)'),
-      '--ship-shadow': withAlpha(navy, 0.12, 'rgba(16,35,58,0.12)'),
-      '--ship-chart-top': withAlpha('#f2f7fb', 0.9, '#f2f7fb'),
-      '--ship-chart-bottom': withAlpha('#ffffff', 0.75, '#ffffff'),
+      '--ship-shadow': withAlpha(navy, isLightMode ? 0.1 : 0.12, 'rgba(16,35,58,0.12)'),
+      '--ship-chart-top': chartTop,
+      '--ship-chart-bottom': chartBottom,
       '--ship-table-head': '#f4f8fb',
-      '--ship-sticky-cell': withAlpha('#ffffff', 0.84, '#ffffff'),
+      '--ship-sticky-cell': stickyCell,
       '--ship-badge-bg': withAlpha(navy, 0.06, 'rgba(18,57,90,0.06)'),
       '--ship-dot-ring': withAlpha(teal, 0.12, 'rgba(17,162,139,0.12)'),
       '--ship-ring-line': withAlpha(navy, 0.08, 'rgba(18,57,90,0.08)'),
@@ -1080,9 +1272,14 @@ export function ShippingEditorialPageRenderer({
       '--ship-accent-soft': withAlpha(teal, 0.14, 'rgba(17,162,139,0.14)'),
       '--ship-gold-soft': withAlpha(gold, 0.14, 'rgba(210,166,69,0.14)'),
       '--ship-accent-glow': withAlpha(teal, 0.18, 'rgba(17,162,139,0.18)'),
-      '--ship-brief-top': mixColors(navy, '#12395a', 0.92, '#12395a'),
-      '--ship-brief-bottom': mixColors(navy, '#174a67', 0.88, '#174a67'),
-      '--ship-brief-glow': withAlpha(teal, 0.22, 'rgba(17,162,139,0.22)'),
+      '--ship-brief-top': briefTop,
+      '--ship-brief-bottom': briefBottom,
+      '--ship-brief-glow': briefGlow,
+      '--ship-brief-card-bg': briefCardBg,
+      '--ship-brief-card-line': briefCardLine,
+      '--ship-control-bg': controlBg,
+      '--ship-pill-bg': pillBg,
+      '--ship-blur': isLightMode ? '8px' : '18px',
       '--ship-bg': background,
       '--ship-ink': text,
       '--ship-muted': muted,
@@ -1097,6 +1294,81 @@ export function ShippingEditorialPageRenderer({
   }, [theme]);
 
   const topMetrics = bundle.metrics.slice(0, 6);
+  const sideRail = resolvedFilterPlacement === 'right' ? (
+    <aside className="vibe-shipping-side-rail">
+      <div>
+        <div className="vibe-shipping-rail-kicker">Command Deck</div>
+        <h2 className="vibe-shipping-rail-title">筛选与聚焦</h2>
+        <div className="vibe-shipping-rail-subline">
+          侧栏不再只是承接控件，而是同步给出当前观察焦点，便于在单页内完成筛选与解读。
+        </div>
+      </div>
+
+      <section className="vibe-shipping-filter-bar">
+        <article className="vibe-shipping-filter-card">
+          <div className="vibe-shipping-filter-label">关注船舶</div>
+          <select className="vibe-shipping-filter-control" value={selectedShip} onChange={(event) => setSelectedShip(event.target.value)}>
+            {shipOptions.map((ship) => (
+              <option key={ship} value={ship}>{ship}</option>
+            ))}
+          </select>
+          <div className="vibe-shipping-filter-caption">切换到单船后，趋势、头部列表和月度明细会同步聚焦该船舶。</div>
+        </article>
+
+        <article className="vibe-shipping-filter-card">
+          <div className="vibe-shipping-filter-label">时间范围</div>
+          <select className="vibe-shipping-filter-control" value={selectedMonthWindow} onChange={(event) => setSelectedMonthWindow(event.target.value)}>
+            {monthWindowOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <div className="vibe-shipping-filter-caption">控制趋势图和月度明细显示的月份范围，避免在画布内信息过密。</div>
+        </article>
+
+        <article className="vibe-shipping-filter-card">
+          <div className="vibe-shipping-filter-label">显示数量</div>
+          <select className="vibe-shipping-filter-control" value={String(selectedTopN)} onChange={(event) => setSelectedTopN(Number(event.target.value))}>
+            {[5, 8, 10].map((count) => (
+              <option key={count} value={String(count)}>前 {count} 项</option>
+            ))}
+          </select>
+          <div className="vibe-shipping-filter-caption">控制头部船舶和月度明细的显示数量，减少阅读噪音。</div>
+        </article>
+      </section>
+
+      {pageFilters.length > 0 ? (
+        <div className="vibe-shipping-filter-pills">
+          {pageFilters.map((filter) => (
+            <div key={filter.id} className="vibe-shipping-filter-pill">
+              <span>{filter.target.column}</span>
+              <span>{filter.type}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <section className="vibe-shipping-rail-stats">
+        {bundle.insights.topShip ? (
+          <article className="vibe-shipping-rail-stat">
+            <div className="vibe-shipping-rail-stat-label">头部船舶</div>
+            <div className="vibe-shipping-rail-stat-value">{bundle.insights.topShip.name}</div>
+            <div className="vibe-shipping-rail-stat-note">
+              {formatNumber(bundle.insights.topShip.days, 1)} 天 / 同比 {formatPercent(bundle.insights.topShip.yoy, 1)}
+            </div>
+          </article>
+        ) : null}
+        {bundle.insights.dominantType ? (
+          <article className="vibe-shipping-rail-stat">
+            <div className="vibe-shipping-rail-stat-label">主力船型</div>
+            <div className="vibe-shipping-rail-stat-value">{bundle.insights.dominantType.name}</div>
+            <div className="vibe-shipping-rail-stat-note">
+              {bundle.insights.dominantType.count} 艘 / {formatPercent((bundle.insights.dominantType.count / Math.max(shipTotal, 1)) * 100, 1)}
+            </div>
+          </article>
+        ) : null}
+      </section>
+    </aside>
+  ) : null;
 
   return (
     <div
@@ -1116,48 +1388,52 @@ export function ShippingEditorialPageRenderer({
         }}
       >
         <main className={`vibe-shipping-page__inner vibe-shipping-page__inner--filters-${resolvedFilterPlacement}`}>
-          <section className="vibe-shipping-filter-bar">
-            <article className="vibe-shipping-card vibe-shipping-filter-card">
-              <div className="vibe-shipping-filter-label">关注船舶</div>
-              <select className="vibe-shipping-filter-control" value={selectedShip} onChange={(event) => setSelectedShip(event.target.value)}>
-                {shipOptions.map((ship) => (
-                  <option key={ship} value={ship}>{ship}</option>
-                ))}
-              </select>
-              <div className="vibe-shipping-filter-caption">切换到单船后，趋势、头部列表和月度明细会同步聚焦该船舶。</div>
-            </article>
+          {resolvedFilterPlacement === 'right' ? sideRail : (
+            <>
+              <section className="vibe-shipping-filter-bar">
+                <article className="vibe-shipping-card vibe-shipping-filter-card">
+                  <div className="vibe-shipping-filter-label">关注船舶</div>
+                  <select className="vibe-shipping-filter-control" value={selectedShip} onChange={(event) => setSelectedShip(event.target.value)}>
+                    {shipOptions.map((ship) => (
+                      <option key={ship} value={ship}>{ship}</option>
+                    ))}
+                  </select>
+                  <div className="vibe-shipping-filter-caption">切换到单船后，趋势、头部列表和月度明细会同步聚焦该船舶。</div>
+                </article>
 
-            <article className="vibe-shipping-card vibe-shipping-filter-card">
-              <div className="vibe-shipping-filter-label">时间范围</div>
-              <select className="vibe-shipping-filter-control" value={selectedMonthWindow} onChange={(event) => setSelectedMonthWindow(event.target.value)}>
-                {monthWindowOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-              <div className="vibe-shipping-filter-caption">控制趋势图和月度明细显示的月份范围，避免在画布内信息过密。</div>
-            </article>
+                <article className="vibe-shipping-card vibe-shipping-filter-card">
+                  <div className="vibe-shipping-filter-label">时间范围</div>
+                  <select className="vibe-shipping-filter-control" value={selectedMonthWindow} onChange={(event) => setSelectedMonthWindow(event.target.value)}>
+                    {monthWindowOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  <div className="vibe-shipping-filter-caption">控制趋势图和月度明细显示的月份范围，避免在画布内信息过密。</div>
+                </article>
 
-            <article className="vibe-shipping-card vibe-shipping-filter-card">
-              <div className="vibe-shipping-filter-label">显示数量</div>
-              <select className="vibe-shipping-filter-control" value={String(selectedTopN)} onChange={(event) => setSelectedTopN(Number(event.target.value))}>
-                {[5, 8, 10].map((count) => (
-                  <option key={count} value={String(count)}>前 {count} 项</option>
-                ))}
-              </select>
-              <div className="vibe-shipping-filter-caption">控制头部船舶和月度明细的显示数量，减少阅读噪音。</div>
-            </article>
-          </section>
+                <article className="vibe-shipping-card vibe-shipping-filter-card">
+                  <div className="vibe-shipping-filter-label">显示数量</div>
+                  <select className="vibe-shipping-filter-control" value={String(selectedTopN)} onChange={(event) => setSelectedTopN(Number(event.target.value))}>
+                    {[5, 8, 10].map((count) => (
+                      <option key={count} value={String(count)}>前 {count} 项</option>
+                    ))}
+                  </select>
+                  <div className="vibe-shipping-filter-caption">控制头部船舶和月度明细的显示数量，减少阅读噪音。</div>
+                </article>
+              </section>
 
-          {pageFilters.length > 0 ? (
-            <div className="vibe-shipping-filter-pills">
-              {pageFilters.map((filter) => (
-                <div key={filter.id} className="vibe-shipping-filter-pill">
-                  <span>{filter.target.column}</span>
-                  <span>{filter.type}</span>
+              {pageFilters.length > 0 ? (
+                <div className="vibe-shipping-filter-pills">
+                  {pageFilters.map((filter) => (
+                    <div key={filter.id} className="vibe-shipping-filter-pill">
+                      <span>{filter.target.column}</span>
+                      <span>{filter.type}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : null}
+              ) : null}
+            </>
+          )}
 
           <section className="vibe-shipping-topbar">
             <article className="vibe-shipping-card vibe-shipping-masthead">
@@ -1370,6 +1646,45 @@ export function ShippingEditorialPageRenderer({
       </div>
     </div>
   );
+}
+
+function isDarkColor(color: string): boolean {
+  const normalized = color.trim();
+  const rgb = normalized.startsWith('#')
+    ? hexToRgb(normalized)
+    : rgbaStringToRgb(normalized);
+  if (!rgb) {
+    return false;
+  }
+  const luminance = (0.299 * rgb.r) + (0.587 * rgb.g) + (0.114 * rgb.b);
+  return luminance < 160;
+}
+
+function hexToRgb(color: string): { r: number; g: number; b: number } | null {
+  const hex = color.replace('#', '').trim();
+  if (!/^[0-9a-f]{3}$|^[0-9a-f]{6}$/i.test(hex)) {
+    return null;
+  }
+  const fullHex = hex.length === 3
+    ? hex.split('').map((part) => `${part}${part}`).join('')
+    : hex;
+  return {
+    r: Number.parseInt(fullHex.slice(0, 2), 16),
+    g: Number.parseInt(fullHex.slice(2, 4), 16),
+    b: Number.parseInt(fullHex.slice(4, 6), 16),
+  };
+}
+
+function rgbaStringToRgb(color: string): { r: number; g: number; b: number } | null {
+  const match = color.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    r: Number.parseInt(match[1], 10),
+    g: Number.parseInt(match[2], 10),
+    b: Number.parseInt(match[3], 10),
+  };
 }
 
 function collectMetricMap(datasets: ShippingSourceDataset[]): Record<string, number> {

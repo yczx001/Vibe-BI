@@ -20,7 +20,6 @@ public record ReportPackage
     public required List<QueryDefinition> Queries { get; init; }
     public required ThemeDefinition Theme { get; init; }
     public Dictionary<string, byte[]> Assets { get; init; } = new();
-    public object? AiContext { get; init; }
 }
 
 public class ReportFileService : IReportFileService
@@ -53,7 +52,6 @@ public class ReportFileService : IReportFileService
         var pages = new List<PageDefinition>();
         var queries = new List<QueryDefinition>();
         var assets = new Dictionary<string, byte[]>();
-        object? aiContext = null;
 
         // Read pages
         var pagesEntry = archive.GetEntry("pages/");
@@ -94,14 +92,6 @@ public class ReportFileService : IReportFileService
             }
         }
 
-        // Read AI context (optional)
-        var aiContextEntry = archive.GetEntry("ai-context.json");
-        if (aiContextEntry != null)
-        {
-            using var stream2 = aiContextEntry.Open();
-            aiContext = await JsonSerializer.DeserializeAsync<object>(stream2, JsonOptions);
-        }
-
         return new ReportPackage
         {
             Manifest = manifest,
@@ -109,8 +99,7 @@ public class ReportFileService : IReportFileService
             Pages = pages,
             Queries = queries,
             Theme = theme,
-            Assets = assets,
-            AiContext = aiContext
+            Assets = assets
         };
     }
 
@@ -154,11 +143,6 @@ public class ReportFileService : IReportFileService
             await entryStream.WriteAsync(data);
         }
 
-        // Write AI context (if present)
-        if (report.AiContext != null)
-        {
-            await WriteJsonToArchive(archive, "ai-context.json", report.AiContext);
-        }
     }
 
     private async Task<T> ReadJsonFromArchive<T>(ZipArchive archive, string entryName)

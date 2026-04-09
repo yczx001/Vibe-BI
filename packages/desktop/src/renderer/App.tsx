@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ReportRenderer, primeQueryCache } from '@vibe-bi/renderer';
-import type { ChartType, ReportDefinition, PageDefinition, QueryDefinition, ThemeDefinition, DataSourceConfig, QueryResult } from '@vibe-bi/core';
+import type { ReportDefinition, PageDefinition, QueryDefinition, ThemeDefinition, DataSourceConfig, QueryResult } from '@vibe-bi/core';
 import {
   CommandButton,
   InfoPill,
@@ -19,6 +19,27 @@ import { ShellIcon, type ShellIconName } from './components/ShellIcon';
 import { DataWorkbench } from './components/DataWorkbench';
 import { BasicDatasetPreview } from './components/BasicDatasetPreview';
 import { ReportCanvasViewport } from './components/ReportCanvasViewport';
+import { AiSessionPane } from './components/AiSessionPane';
+import type {
+  AiDesignColorMode,
+  AiDesignDensity,
+  AiDesignFilterPlacement,
+  AiDesignFocus,
+  AiDesignInteractionLevel,
+  AiDesignIntakeDraft,
+  AiDesignStylePreset,
+} from './components/AiDesignIntakeDialog';
+import { cancelAgentRun, createAgentSession, openAgentSessionStream, probeAgentConnection, submitAgentMessage } from './ai/agent-api';
+import type {
+  AgentDatasetContext,
+  AgentExecutionContext,
+  AgentStreamEvent,
+  AiAgentSettings,
+  AiConnectionProbeResult,
+  AiMessage,
+  AiRunStep,
+  AiRunTrace,
+} from './ai/types';
 import type {
   CustomDatasetDraft,
   DatasetImportMode,
@@ -77,64 +98,6 @@ function clampReportCanvasZoom(value: number): number {
   );
 }
 
-function summarizeUserIntentPreview(text: string, maxLength = 72): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, maxLength - 1)}…`;
-}
-
-function buildAiExecutionPlanLines(mode: PersistedAiComposerMode, intent: string): string[] {
-  const intentPreview = summarizeUserIntentPreview(intent);
-  const planLines = mode === 'refine'
-    ? [
-      '先分析当前报表结构、主题和组件约束。',
-      '再锁定本轮需要调整的主题、图表类型、布局或标题文案。',
-      '生成新的报表 JSON 后继续校验，必要时自动修复查询与结构问题。',
-    ]
-    : [
-      '先分析模型或当前素材，提炼本页的业务叙事和重点指标。',
-      '再规划主视觉区、KPI 区、趋势区和结构区，避免平均平铺。',
-      '生成完整报表 JSON 后继续校验，必要时自动修复查询与结构问题。',
-    ];
-
-  return [
-    `已接收需求：${intentPreview || '开始新的 AI 会话。'}`,
-    ...planLines,
-  ];
-}
-
-function mapAiProgressToTraceLine(step?: string, message?: string): string | null {
-  switch (step) {
-    case 'reading_metadata':
-      return `分析数据模型：${message || '正在读取表、字段和度量。'}`;
-    case 'validating':
-      return `分析当前报表：${message || '正在整理页面、组件和查询上下文。'}`;
-    case 'building_prompt':
-      return `制定执行方案：${message || '正在生成本轮可落地的设计与修改约束。'}`;
-    case 'generating':
-      return `生成报表定义：${message || '正在组织主题、布局和图表配置。'}`;
-    case 'refining':
-      return `修改报表定义：${message || '正在按要求调整主题、图表和版式。'}`;
-    case 'parsing':
-      return `校验返回结果：${message || '正在解析 JSON 并补齐必需结构。'}`;
-    case 'repairing_queries':
-      return `自动修复问题：${message || '检测到查询或字段映射问题，继续修复。'}`;
-    case 'complete':
-      return `执行完成：${message || '本轮结果已应用到当前画布。'}`;
-    case 'error':
-      return `执行异常：${message || 'AI 返回了错误。'}`;
-    default:
-      if (!message?.trim()) {
-        return null;
-      }
-
-      return message.trim();
-  }
-}
-
 function mergeThemeWithFallback(theme?: ThemeDefinition | null): ThemeDefinition {
   return {
     ...sampleTheme,
@@ -159,158 +122,437 @@ function mergeThemeWithFallback(theme?: ThemeDefinition | null): ThemeDefinition
   };
 }
 
-function normalizeReportForRuntime(report: ReportDefinition, fallbackTheme?: ThemeDefinition | null): ReportDefinition {
+const defaultAiSettings: AiAgentSettings = {
+  provider: 'anthropic',
+  baseUrl: '',
+  apiKey: '',
+  model: '',
+  maxRepairRounds: 2,
+  traceVerbosity: 'detailed',
+};
+
+const settingsInputStyle: React.CSSProperties = {
+  width: '100%',
+  padding: '10px 12px',
+  borderRadius: 8,
+  border: '1px solid rgba(32, 31, 30, 0.12)',
+  background: '#FFFFFF',
+  color: '#201F1E',
+  fontSize: 13,
+  boxSizing: 'border-box',
+};
+
+function buildDirectGeneratePrompt(datasetCount: number): string {
+  const datasetHint = datasetCount > 0
+    ? `当前已导入 ${datasetCount} 个可用数据集，请直接基于这些数据生成完整报表。`
+    : '请基于当前模型上下文直接生成完整报表。';
+
+  return [
+    datasetHint,
+    '不要先进入闲聊，也不要只给建议，直接开始生成首版报表。',
+    '必须使用内置的 front-end design 设计能力，做出有设计感、有重点、有层次的页面。',
+    '优先形成一个可直接展示的完整首页，包含清晰的信息主线、关键指标区、趋势区和明细区。',
+    '如存在可用筛选器或适合做筛选的字段，请合理布局到页面中，并让整体排版协调。',
+    '避免模板化和机械式均分布局，优先保证视觉层次、对齐、留白和可读性。',
+  ].join('\n');
+}
+
+const defaultAiDesignIntakeDraft: AiDesignIntakeDraft = {
+  stylePreset: 'boardroom-editorial',
+  colorMode: 'light',
+  focus: 'hero-metric',
+  density: 'balanced',
+  filterPlacement: 'top',
+  interactionLevel: 'standard',
+  notes: '',
+};
+
+function describeStylePreset(value: AiDesignStylePreset): string {
+  switch (value) {
+    case 'boardroom-editorial':
+      return 'Boardroom Editorial：偏经营汇报，层级清晰、可读性优先。';
+    case 'harbor-ledger':
+      return 'Harbor Ledger：更像运营台账，强调细节、节奏和数据密度。';
+    case 'midnight-industrial':
+      return 'Midnight Industrial：深色工业风，强调沉稳、强对比和控制台感。';
+    case 'atlas-feature':
+      return 'Atlas Feature：更像专题页，强调叙事和视觉张力。';
+  }
+}
+
+function describeColorMode(value: AiDesignColorMode): string {
+  switch (value) {
+    case 'light':
+      return '整体以浅色为主，不要做成深色控制台。';
+    case 'dark':
+      return '整体以深色为主，但要控制灰雾感和低对比问题。';
+    case 'auto':
+      return '由 AI 自主选择最适合当前风格的明暗方向。';
+  }
+}
+
+function describeFocus(value: AiDesignFocus): string {
+  switch (value) {
+    case 'hero-metric':
+      return '首屏优先突出一个最关键的 hero 指标。';
+    case 'trend-story':
+      return '优先把趋势区做成最重要的叙事区。';
+    case 'ranking-comparison':
+      return '优先强调排行和结构对比。';
+    case 'detail-ledger':
+      return '优先保证明细和台账区更强、更有存在感。';
+  }
+}
+
+function describeDensity(value: AiDesignDensity): string {
+  switch (value) {
+    case 'airy':
+      return '整体留白更大，模块数量宁少勿乱。';
+    case 'balanced':
+      return '整体保持平衡的留白与信息密度。';
+    case 'dense':
+      return '允许更高的信息密度，但必须保持可读和分区清楚。';
+  }
+}
+
+function describeFilterPlacement(value: AiDesignFilterPlacement): string {
+  switch (value) {
+    case 'top':
+      return '筛选器优先放在顶部，并且做成页面的一部分。';
+    case 'left':
+      return '筛选器优先放在左侧，形成稳定边栏。';
+    case 'right':
+      return '筛选器优先放在右侧，但不要抢主视觉。';
+  }
+}
+
+function describeInteractionLevel(value: AiDesignInteractionLevel): string {
+  switch (value) {
+    case 'subtle':
+      return '交互要克制，只保留必要联动。';
+    case 'standard':
+      return '交互保持标准强度，至少有筛选联动和关键模块聚焦。';
+    case 'rich':
+      return '交互可以更丰富，但不能牺牲可读性和稳定性。';
+  }
+}
+
+function buildGuidedGeneratePrompt(datasetCount: number, draft: AiDesignIntakeDraft): string {
+  const datasetHint = datasetCount > 0
+    ? `当前已导入 ${datasetCount} 个可用数据集，请直接基于这些数据生成完整报表。`
+    : '请基于当前模型上下文直接生成完整报表。';
+
+  return [
+    datasetHint,
+    '先按已确认的风格设置生成首版报表，不要先闲聊。',
+    '必须使用内置 front-end design 设计能力，并优先保证真实数据可见、页面可读、后续可继续微调。',
+    describeStylePreset(draft.stylePreset),
+    describeColorMode(draft.colorMode),
+    describeFocus(draft.focus),
+    describeDensity(draft.density),
+    describeFilterPlacement(draft.filterPlacement),
+    describeInteractionLevel(draft.interactionLevel),
+    '请在生成时先形成一个完整首页，再通过后续对话继续微调。',
+    draft.notes.trim() ? `补充要求：${draft.notes.trim()}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function buildGuidedGenerateDisplayMessage(draft: AiDesignIntakeDraft): string {
+  return [
+    '生成前已确认风格',
+    `主题：${draft.stylePreset}`,
+    `色调：${draft.colorMode}`,
+    `重点：${draft.focus}`,
+    `密度：${draft.density}`,
+    `筛选：${draft.filterPlacement}`,
+    `交互：${draft.interactionLevel}`,
+    draft.notes.trim() ? `补充：${draft.notes.trim()}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+type AiDesignQuestionField = 'stylePreset' | 'colorMode' | 'focus' | 'density' | 'filterPlacement' | 'interactionLevel';
+type AiDesignQuestion = {
+  field: AiDesignQuestionField;
+  title: string;
+  prompt: string;
+  options: Array<{
+    value: string;
+    label: string;
+    description?: string;
+  }>;
+};
+
+function inferDesignFocusOptions(items: ImportSummaryItem[]): AiDesignFocus[] {
+  const names = items.map((item) => `${item.name} ${item.type}`.toLowerCase()).join(' ');
+  const options: AiDesignFocus[] = ['hero-metric'];
+
+  if (/趋势|年月|月份|line|area|time|month/.test(names)) {
+    options.push('trend-story');
+  }
+  if (/排名|排行|船舶|结构|船型|船龄|bar|pie/.test(names)) {
+    options.push('ranking-comparison');
+  }
+  if (/明细|detail|table|matrix|透视/.test(names)) {
+    options.push('detail-ledger');
+  }
+
+  return Array.from(new Set(options));
+}
+
+function hasFilterableFields(items: ImportSummaryItem[]): boolean {
+  return items.some((item) => item.fields.some((field) => {
+    const type = String(field.dataType || '').toLowerCase();
+    return field.isVisible && !/(number|decimal|double|int|currency)/.test(type);
+  }));
+}
+
+function buildAiDesignQuestions(
+  items: ImportSummaryItem[],
+  draft: AiDesignIntakeDraft,
+  askedFields: AiDesignQuestionField[],
+): AiDesignQuestion[] {
+  const questions: AiDesignQuestion[] = [];
+  const focusOptions = inferDesignFocusOptions(items);
+
+  if (!askedFields.includes('stylePreset')) {
+    questions.push({
+      field: 'stylePreset',
+      title: '先选这版的主题方向',
+      prompt: '我先给你几个更适合当前报表的方向，你选一个起点，后面我再继续细化。',
+      options: [
+        { value: 'boardroom-editorial', label: 'Boardroom Editorial', description: '偏经营汇报，层级清晰、稳定。' },
+        { value: 'harbor-ledger', label: 'Harbor Ledger', description: '更像运营台账，强调细节和节奏。' },
+        { value: 'midnight-industrial', label: 'Midnight Industrial', description: '深色工业风，强调强对比。' },
+        { value: 'atlas-feature', label: 'Atlas Feature', description: '更像专题页，适合做故事化表达。' },
+      ],
+    });
+  }
+
+  if (!askedFields.includes('colorMode')) {
+    questions.push({
+      field: 'colorMode',
+      title: '这版更偏浅色还是深色？',
+      prompt: `当前主题起点是 ${draft.stylePreset}，我需要确认整体明暗方向。`,
+      options: [
+        { value: 'light', label: '浅色', description: '更适合经营汇报和打印。' },
+        { value: 'dark', label: '深色', description: '更适合工业风和大屏氛围。' },
+        { value: 'auto', label: '自动', description: '让我根据主题自己决定。' },
+      ],
+    });
+  }
+
+  if (!askedFields.includes('focus') && focusOptions.length > 1) {
+    questions.push({
+      field: 'focus',
+      title: '首屏最该强调什么？',
+      prompt: '我会根据当前数据素材，把首屏的主要视觉重量放在你选的这类信息上。',
+      options: focusOptions.map((value) => ({
+        value,
+        label: {
+          'hero-metric': '重点指标优先',
+          'trend-story': '趋势叙事优先',
+          'ranking-comparison': '排行对比优先',
+          'detail-ledger': '明细台账优先',
+        }[value],
+      })),
+    });
+  }
+
+  if (!askedFields.includes('filterPlacement') && hasFilterableFields(items)) {
+    questions.push({
+      field: 'filterPlacement',
+      title: '筛选器放哪更顺手？',
+      prompt: '当前数据有足够的筛选字段，我会把筛选器做成页面的一部分，而不是孤立控件。',
+      options: [
+        { value: 'top', label: '顶部', description: '适合 boardroom 和专题页。' },
+        { value: 'left', label: '左侧', description: '适合明细密度更高的页面。' },
+        { value: 'right', label: '右侧', description: '适合不想干扰主视觉时。' },
+      ],
+    });
+  }
+
+  if (!askedFields.includes('density')) {
+    questions.push({
+      field: 'density',
+      title: '这版信息密度要多大？',
+      prompt: '我可以偏留白，也可以更紧凑，但会保持可读性优先。',
+      options: [
+        { value: 'airy', label: '留白更大' },
+        { value: 'balanced', label: '平衡' },
+        { value: 'dense', label: '信息更密' },
+      ],
+    });
+  }
+
+  if (!askedFields.includes('interactionLevel')) {
+    questions.push({
+      field: 'interactionLevel',
+      title: '交互要多丰富？',
+      prompt: '我会决定首轮交互密度，后续仍然可以再微调。',
+      options: [
+        { value: 'subtle', label: '克制' },
+        { value: 'standard', label: '标准' },
+        { value: 'rich', label: '更丰富' },
+      ],
+    });
+  }
+
+  return questions;
+}
+
+function createInitialTrace(runId: string): AiRunTrace {
   return {
-    ...report,
-    theme: mergeThemeWithFallback(report.theme || fallbackTheme || sampleTheme),
+    runId,
+    status: 'queued',
+    title: 'AI 执行链路',
+    summary: '等待开始。',
+    startedAt: new Date().toISOString(),
+    steps: [],
+    logs: [],
+    issues: [],
+    artifactReady: false,
   };
 }
 
-function buildReportComparisonSnapshot(report: ReportDefinition) {
+function upsertTraceStep(
+  steps: AiRunStep[],
+  step: AiRunStep,
+): AiRunStep[] {
+  const existingIndex = steps.findIndex((entry) => entry.stepId === step.stepId);
+  if (existingIndex < 0) {
+    return [...steps, step];
+  }
+
+  const next = [...steps];
+  next[existingIndex] = {
+    ...next[existingIndex],
+    ...step,
+    details: step.details ?? next[existingIndex].details,
+  };
+  return next;
+}
+
+function appendTraceLog(
+  logs: AiRunTrace['logs'],
+  nextLog: AiRunTrace['logs'][number],
+): AiRunTrace['logs'] {
+  const existing = logs.find((item) => item.id === nextLog.id);
+  if (existing) {
+    return logs;
+  }
+
+  const merged = [...logs, nextLog];
+  if (merged.length > 80) {
+    return merged.slice(merged.length - 80);
+  }
+  return merged;
+}
+
+function appendSystemMessage(
+  messages: AiMessage[],
+  content: string,
+  timestamp: string,
+  runId?: string,
+): AiMessage[] {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return messages;
+  }
+
+  const last = messages[messages.length - 1];
+  if (last?.role === 'system' && last.content === trimmed && last.runId === runId) {
+    return messages;
+  }
+
+  return [
+    ...messages,
+    {
+      id: `system-${runId || 'global'}-${timestamp}-${messages.length}`,
+      role: 'system',
+      content: trimmed,
+      timestamp,
+      runId,
+    },
+  ];
+}
+
+function createQueryDefinitionFromDataset(item: ImportSummaryItem): QueryDefinition | null {
+  const queryId = item.queryId?.trim();
+  const baseDax = item.fullQuery?.trim();
+  const executionDax = item.executionDax?.trim()
+    || (typeof item.selectedEvaluateIndex === 'number' && item.evaluateQueries?.[item.selectedEvaluateIndex]
+      ? item.evaluateQueries[item.selectedEvaluateIndex]?.trim()
+      : undefined)
+    || baseDax;
+
+  if (!queryId || !baseDax) {
+    return null;
+  }
+
   return {
-    id: report.id,
-    name: report.name,
-    description: report.description || '',
-    generationMode: report.generationMode || '',
-    pages: report.pages,
-    defaultPage: report.defaultPage || '',
-    theme: mergeThemeWithFallback(report.theme),
+    id: queryId,
+    name: item.name,
+    dax: baseDax,
+    executionDax,
+    evaluateQueries: item.evaluateQueries || [],
+    selectedEvaluateIndex: item.selectedEvaluateIndex,
+    parameters: [],
   };
 }
 
-function countChangedQueries(previousQueries: QueryDefinition[], nextQueries: QueryDefinition[]): number {
-  const previousMap = new Map(previousQueries.map((query) => [query.id, JSON.stringify(query)]));
-  const nextMap = new Map(nextQueries.map((query) => [query.id, JSON.stringify(query)]));
-  const ids = new Set([...previousMap.keys(), ...nextMap.keys()]);
-  let changed = 0;
+function buildAgentDatasetContexts(items: ImportSummaryItem[]): AgentDatasetContext[] {
+  return items
+    .filter((item) => item.hasQuery)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      type: item.type,
+      queryMode: item.queryMode,
+      sourceLabel: item.sourceLabel,
+      fields: item.fields,
+      charts: item.charts,
+      previewResult: item.previewResult,
+      query: createQueryDefinitionFromDataset(item) || undefined,
+    }))
+    .filter((item) => Boolean(item.query)) as AgentDatasetContext[];
+}
 
-  ids.forEach((id) => {
-    if (previousMap.get(id) !== nextMap.get(id)) {
-      changed += 1;
-    }
+function buildBaselineQueries(
+  queries: QueryDefinition[],
+  datasets: AgentDatasetContext[] = [],
+): QueryDefinition[] {
+  const baselineById = new Map<string, QueryDefinition>();
+
+  queries.forEach((query) => {
+    baselineById.set(query.id, {
+      ...query,
+      executionDax: query.dax,
+      evaluateQueries: [],
+      selectedEvaluateIndex: undefined,
+    });
   });
 
-  return changed;
-}
-
-function countChangedComponents(previousPages: PageDefinition[], nextPages: PageDefinition[]): number {
-  const previousMap = new Map(
-    previousPages.flatMap((page) => page.components.map((component) => [`${page.id}/${component.id}`, JSON.stringify(component)] as const))
-  );
-  const nextMap = new Map(
-    nextPages.flatMap((page) => page.components.map((component) => [`${page.id}/${component.id}`, JSON.stringify(component)] as const))
-  );
-  const ids = new Set([...previousMap.keys(), ...nextMap.keys()]);
-  let changed = 0;
-
-  ids.forEach((id) => {
-    if (previousMap.get(id) !== nextMap.get(id)) {
-      changed += 1;
-    }
-  });
-
-  return changed;
-}
-
-function isDarkTheme(theme: ThemeDefinition): boolean {
-  const background = theme.colors.background || '';
-  const normalized = background.replace('#', '');
-  if (normalized.length !== 6) {
-    return false;
-  }
-
-  const red = parseInt(normalized.slice(0, 2), 16);
-  const green = parseInt(normalized.slice(2, 4), 16);
-  const blue = parseInt(normalized.slice(4, 6), 16);
-  const luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue);
-  return luminance < 150;
-}
-
-function summarizeAppliedChanges(
-  previousReport: ReportDefinition,
-  previousPages: PageDefinition[],
-  previousQueries: QueryDefinition[],
-  nextReport: ReportDefinition,
-  nextPages: PageDefinition[],
-  nextQueries: QueryDefinition[],
-  userIntent: string,
-  aiMessage?: string
-): string {
-  const previousTheme = mergeThemeWithFallback(previousReport.theme);
-  const nextTheme = mergeThemeWithFallback(nextReport.theme);
-  const nextThemeName = nextTheme.name?.trim();
-  const themeChanged = JSON.stringify(previousTheme) !== JSON.stringify(nextTheme);
-  const reportChanged = JSON.stringify(buildReportComparisonSnapshot(previousReport)) !== JSON.stringify(buildReportComparisonSnapshot(nextReport));
-  const changedQueries = countChangedQueries(previousQueries, nextQueries);
-  const changedComponents = countChangedComponents(previousPages, nextPages);
-  const parts: string[] = [];
-
-  if (themeChanged) {
-    if (nextThemeName && nextThemeName.toLowerCase().includes('dracula')) {
-      parts.push('已切换为 Dracula 主题');
-    } else {
-      parts.push(isDarkTheme(nextTheme) ? '已切换为深色报表主题' : '已更新报表主题');
-    }
-  }
-
-  if (changedComponents > 0) {
-    parts.push(`已调整 ${changedComponents} 个组件的布局或样式`);
-  }
-
-  if (changedQueries > 0) {
-    parts.push(`已同步更新 ${changedQueries} 条查询或字段映射`);
-  }
-
-  if (!themeChanged && /深色|浅色|配色|颜色|主题/.test(userIntent) && changedComponents > 0) {
-    parts.push('当前主要变更落在图表或组件样式，整份报表主题未切换');
-  }
-
-  if (!themeChanged && /dracula/i.test(userIntent)) {
-    parts.push('当前报表主题名称仍未切换到 Dracula');
-  }
-
-  if (!parts.length && reportChanged) {
-    parts.push('已应用报表级修改');
-  }
-
-  if (!parts.length && aiMessage?.trim()) {
-    return aiMessage.trim();
-  }
-
-  return `${parts.join('，')}。`;
-}
-
-async function* readSseDataLines(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<string> {
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-
-    let newlineIndex = buffer.indexOf('\n');
-    while (newlineIndex >= 0) {
-      const rawLine = buffer.slice(0, newlineIndex).replace(/\r$/, '');
-      buffer = buffer.slice(newlineIndex + 1);
-
-      if (rawLine.startsWith('data: ')) {
-        yield rawLine.slice(6);
-      }
-
-      newlineIndex = buffer.indexOf('\n');
-    }
-
-    if (done) {
-      const trailingLine = buffer.trim();
-      if (trailingLine.startsWith('data: ')) {
-        yield trailingLine.slice(6);
-      }
+  datasets.forEach((dataset) => {
+    const query = dataset.query;
+    if (!query?.id || !query.dax?.trim()) {
       return;
     }
-  }
-}
 
-type PersistedAiComposerMode = 'generate-model' | 'generate-asset' | 'refine';
+    const existing = baselineById.get(query.id);
+    baselineById.set(query.id, {
+      ...(existing || query),
+      id: query.id,
+      name: query.name,
+      dax: query.dax,
+      executionDax: query.dax,
+      evaluateQueries: [],
+      selectedEvaluateIndex: undefined,
+      parameters: query.parameters || existing?.parameters || [],
+    });
+  });
+
+  return Array.from(baselineById.values());
+}
 
 type QueryRow = Record<string, unknown>;
 type RibbonTabId = 'home' | 'dataset' | 'ai' | 'view';
@@ -325,71 +567,17 @@ type PowerBiScanItem = {
   label: string;
 };
 type DatasetDialogMode = 'import-json' | 'custom-dax' | 'query-builder';
-type AiProgressPayload = {
-  step?: string;
-  message?: string;
-  report?: ReportDefinition;
-  pages?: PageDefinition[];
-  queries?: QueryDefinition[];
+type SettingsTabId = 'ai' | 'runtime';
+type BrowserPreviewPayload = {
+  report: ReportDefinition;
+  pages: PageDefinition[];
+  queries: QueryDefinition[];
+  theme?: ThemeDefinition | null;
+  apiBaseUrl?: string;
+  dataSource?: DataSourceConfig;
+  activeComponentId?: string;
+  prefetchedRowsByQuery?: Record<string, QueryResult>;
 };
-type RawAiProgressPayload = AiProgressPayload & {
-  Step?: string;
-  Message?: string;
-  Report?: ReportDefinition;
-  Pages?: PageDefinition[];
-  Queries?: QueryDefinition[];
-};
-type ComposePromptResponse = {
-  prompt?: string;
-  Prompt?: string;
-};
-
-const defaultGenerationPrompt = '请自动设计一份美观、专业、具有清晰信息层级的 Power BI 风格报表。';
-
-function normalizeAiProgressPayload(raw: unknown): AiProgressPayload | null {
-  if (!raw || typeof raw !== 'object') {
-    return null;
-  }
-
-  const payload = raw as RawAiProgressPayload;
-  const pages = Array.isArray(payload.pages)
-    ? payload.pages
-    : Array.isArray(payload.Pages)
-      ? payload.Pages
-      : undefined;
-  const queries = Array.isArray(payload.queries)
-    ? payload.queries
-    : Array.isArray(payload.Queries)
-      ? payload.Queries
-      : undefined;
-
-  return {
-    step: typeof payload.step === 'string' ? payload.step : typeof payload.Step === 'string' ? payload.Step : undefined,
-    message: typeof payload.message === 'string' ? payload.message : typeof payload.Message === 'string' ? payload.Message : undefined,
-    report: payload.report ?? payload.Report,
-    pages,
-    queries,
-  };
-}
-
-function parseAiProgressPayload(json: string): AiProgressPayload | null {
-  try {
-    return normalizeAiProgressPayload(JSON.parse(json));
-  } catch {
-    return null;
-  }
-}
-
-function parseComposePromptResponse(json: string): string {
-  const payload = JSON.parse(json) as ComposePromptResponse;
-  const prompt = typeof payload.prompt === 'string'
-    ? payload.prompt
-    : typeof payload.Prompt === 'string'
-      ? payload.Prompt
-      : '';
-
-  return prompt.trim();
-}
 
 function quoteDaxString(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -582,14 +770,6 @@ function isTemporalFieldValue(value: unknown): boolean {
   return /^(\d{4}[-/年]\d{1,2}([-/月]\d{1,2}日?)?|\d{1,2}月|\d{1,2}季度|q[1-4]|\d{4}q[1-4]|\d{4}年)$/i.test(trimmed);
 }
 
-function formatFieldLabel(field: string): string {
-  return field
-    .replace(/'/g, '')
-    .replace(/\[|\]/g, '')
-    .replace(/__/g, ' ')
-    .trim();
-}
-
 function getQueryFieldNames(result?: QueryResult): string[] {
   return result?.columns
     .map((column) => column.name)
@@ -664,87 +844,6 @@ function getPieCategoryFieldName(rows: QueryRow[], fieldNames: string[], valueFi
   return getCategoryFieldName(rows, fieldNames, valueFields);
 }
 
-function buildComponentConfig(
-  componentType: PageDefinition['components'][number]['type'],
-  chartType: ChartType,
-  title: string,
-  queryResult?: QueryResult
-) {
-  const rows = (queryResult?.rows || []) as QueryRow[];
-  const fieldNames = getQueryFieldNames(queryResult);
-  const numericFields = getNumericFieldNames(rows, fieldNames);
-
-  if (componentType === 'kpi-card') {
-    const valueField = numericFields[0] || fieldNames[0] || '';
-    return {
-      title,
-      valueField,
-      format: { type: 'number' as const, decimals: 0 },
-    };
-  }
-
-  if (componentType === 'data-table') {
-    return {
-      title,
-      columns: fieldNames.map((field) => ({
-        field,
-        header: formatFieldLabel(field) || field,
-      })),
-    };
-  }
-
-  const valueFields = numericFields.length > 0
-    ? numericFields
-    : [fieldNames.find((field) => field !== fieldNames[0]) || fieldNames[0] || ''];
-  const categoryField = getCategoryFieldName(rows, fieldNames, valueFields);
-
-  if (chartType === 'pie') {
-    const valueField = valueFields[0] || fieldNames[0] || '';
-    const nameField = getPieCategoryFieldName(rows, fieldNames, valueFields)
-      || categoryField
-      || fieldNames.find((field) => field !== valueField)
-      || '__rowIndex';
-
-    return {
-      title,
-      chartType,
-      xAxis: {
-        field: nameField,
-        type: isDateLike(rows[0]?.[nameField]) ? 'time' as const : 'category' as const,
-      },
-      series: valueField ? [{
-        field: valueField,
-        name: formatFieldLabel(valueField) || title,
-        type: 'pie' as const,
-      }] : [],
-    };
-  }
-
-  return {
-    title,
-    chartType,
-    xAxis: {
-      field: categoryField,
-      type: isDateLike(rows[0]?.[categoryField]) ? 'time' as const : 'category' as const,
-    },
-    yAxis: valueFields
-      .filter(Boolean)
-      .map((field) => ({
-        field,
-        name: formatFieldLabel(field) || field,
-        type: 'value' as const,
-      })),
-    series: valueFields
-      .filter(Boolean)
-      .map((field) => ({
-        field,
-        name: formatFieldLabel(field) || field,
-        type: chartType,
-        smooth: chartType === 'line',
-      })),
-  };
-}
-
 function resolveComponentTypeFromDatasetChartType(chartType: DatasetVisualType): PageDefinition['components'][number]['type'] {
   if (chartType === 'kpi-card') {
     return 'kpi-card';
@@ -758,22 +857,6 @@ function resolveComponentTypeFromDatasetChartType(chartType: DatasetVisualType):
   return 'echarts';
 }
 
-function resolveRenderableChartType(chartType: DatasetVisualType): ChartType {
-  if (chartType === 'pie') {
-    return 'pie';
-  }
-  if (chartType === 'line') {
-    return 'line';
-  }
-  if (chartType === 'area') {
-    return 'area';
-  }
-  if (chartType === 'scatter') {
-    return 'scatter';
-  }
-  return 'bar';
-}
-
 function createDatasetFields(result?: QueryResult) {
   if (!result) {
     return [];
@@ -783,6 +866,7 @@ function createDatasetFields(result?: QueryResult) {
     .filter((column) => column.name !== '__rowIndex')
     .map((column) => ({
       name: column.name,
+      label: column.name,
       dataType: column.dataType,
       isVisible: true,
     }));
@@ -1775,7 +1859,17 @@ function ImportInspectorModal({ state, onClose, executeQuery }: ImportInspectorM
 
 export function App() {
   const [apiUrl, setApiUrl] = useState<string>('');
+  const [agentBaseUrl, setAgentBaseUrl] = useState<string>('');
   const [error, setError] = useState<string>('');
+  const browserPreviewParams = React.useMemo(() => {
+    const search = new URLSearchParams(window.location.search);
+    return {
+      enabled: search.get('browser-preview') === '1',
+      previewUrl: search.get('preview-url')?.trim() || '',
+    };
+  }, []);
+  const isBrowserPreview = browserPreviewParams.enabled;
+  const [browserPreviewPayload, setBrowserPreviewPayload] = useState<BrowserPreviewPayload | null>(null);
 
   // Connection state
   const [connectionString, setConnectionString] = useState<string>('');
@@ -1792,16 +1886,6 @@ export function App() {
   const [activeTab, setActiveTab] = useState<'tables' | 'measures'>('tables');
   const [showConnectDialog, setShowConnectDialog] = useState(false);
 
-  type AiComposerMode = PersistedAiComposerMode;
-  type AiGenerationMode = Exclude<AiComposerMode, 'refine'>;
-  interface ChatMessage {
-    role: 'user' | 'assistant';
-    content: string;
-    timestamp: string;
-  }
-
-  // AI Generation state
-  const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<string>('');
   const [generatedReport, setGeneratedReport] = useState<ReportDefinition | null>(null);
   const [generatedPages, setGeneratedPages] = useState<PageDefinition[]>([]);
@@ -1809,12 +1893,20 @@ export function App() {
 
   // Settings state
   const [showSettings, setShowSettings] = useState(false);
-  const [aiApiKey, setAiApiKey] = useState<string>(localStorage.getItem('vibeBiAiApiKey') || '');
-  const [aiProvider, setAiProvider] = useState<string>(localStorage.getItem('vibeBiAiProvider') || 'claude');
-  const [aiBaseUrl, setAiBaseUrl] = useState<string>(localStorage.getItem('vibeBiAiBaseUrl') || '');
-  const [aiModel, setAiModel] = useState<string>(localStorage.getItem('vibeBiAiModel') || '');
-  const [aiTestStatus, setAiTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-  const [aiTestMessage, setAiTestMessage] = useState<string>('');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>('ai');
+  const [aiSettings, setAiSettings] = useState<AiAgentSettings>(defaultAiSettings);
+  const [aiSettingsLoaded, setAiSettingsLoaded] = useState(false);
+  const [isTestingAiConnection, setIsTestingAiConnection] = useState(false);
+  const [aiConnectionProbe, setAiConnectionProbe] = useState<AiConnectionProbeResult | null>(null);
+  const [aiConnectionProbeError, setAiConnectionProbeError] = useState('');
+  const [aiSessionId, setAiSessionId] = useState<string>('');
+  const [aiMessages, setAiMessages] = useState<AiMessage[]>([]);
+  const [aiTraceMap, setAiTraceMap] = useState<Record<string, AiRunTrace>>({});
+  const [aiActiveRunId, setAiActiveRunId] = useState<string | undefined>(undefined);
+  const [aiAgentError, setAiAgentError] = useState<string>('');
+  const [aiDesignIntakeDraft, setAiDesignIntakeDraft] = useState<AiDesignIntakeDraft>(defaultAiDesignIntakeDraft);
+  const [aiDesignAskedFields, setAiDesignAskedFields] = useState<AiDesignQuestionField[]>([]);
+  const [aiDesignPendingQuestion, setAiDesignPendingQuestion] = useState<AiDesignQuestion | null>(null);
 
   // Performance Analyzer import state
   const [isImporting, setIsImporting] = useState(false);
@@ -1847,39 +1939,117 @@ export function App() {
   const [showRightPane, setShowRightPane] = useState(true);
   const [isRibbonCollapsed, setIsRibbonCollapsed] = useState(false);
 
-  // AI Dialogue state for incremental modification
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
-  const [isRefining, setIsRefining] = useState(false);
-  const [aiComposerMode, setAiComposerMode] = useState<AiComposerMode>('generate-model');
-  const [isComposingPrompt, setIsComposingPrompt] = useState(false);
-  const [aiExecutionTraceLines, setAiExecutionTraceLines] = useState<string[]>([]);
-  const [hasHydratedAiConversation, setHasHydratedAiConversation] = useState(false);
   const [reportCanvasZoomMode, setReportCanvasZoomMode] = useState<'fit' | 'manual'>('fit');
   const [reportCanvasFitZoomPercent, setReportCanvasFitZoomPercent] = useState(74);
   const [reportCanvasManualZoomPercent, setReportCanvasManualZoomPercent] = useState(100);
   const [reportCanvasZoomInputValue, setReportCanvasZoomInputValue] = useState('100');
-  const aiConversationScrollRef = React.useRef<HTMLDivElement>(null);
-  const lastPersistedAiConversationRef = React.useRef('');
+  const aiStreamRef = React.useRef<EventSource | null>(null);
 
   useEffect(() => {
+    if (!isBrowserPreview) {
+      return;
+    }
+
+    if (!browserPreviewParams.previewUrl) {
+      setError('缺少浏览器预览地址。');
+      return;
+    }
+
+    let cancelled = false;
+    setError('');
+
+    fetch(browserPreviewParams.previewUrl, {
+      headers: {
+        Accept: 'application/json',
+      },
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`浏览器预览数据加载失败: HTTP ${response.status}`);
+        }
+
+        const payload = await response.json() as BrowserPreviewPayload;
+        if (!cancelled) {
+          const previewDataSource = payload.dataSource;
+          if (previewDataSource && payload.prefetchedRowsByQuery && payload.queries?.length) {
+            Object.entries(payload.prefetchedRowsByQuery).forEach(([queryId, result]) => {
+              const query = payload.queries.find((candidate) => candidate.id === queryId);
+              if (!query || !Array.isArray(result?.rows)) {
+                return;
+              }
+
+              primeQueryCache(query, result.rows, {
+                dataSource: previewDataSource,
+                executionDax: query.executionDax,
+                dax: query.dax,
+              });
+            });
+          }
+          setBrowserPreviewPayload(payload);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [browserPreviewParams.previewUrl, isBrowserPreview]);
+
+  useEffect(() => {
+    if (isBrowserPreview) {
+      return;
+    }
+
     if (!window.electronAPI?.getApiUrl) {
       setError('桌面 API 不可用，请确认 Electron preload 已正确加载。');
       return;
     }
 
-    window.electronAPI.getApiUrl()
-      .then((url) => {
+    Promise.all([
+      window.electronAPI.getApiUrl(),
+      window.electronAPI.getAgentUrl?.() || Promise.resolve(''),
+      window.electronAPI.loadAiSettings?.() || Promise.resolve(defaultAiSettings),
+    ])
+      .then(([url, agentUrl, persistedAiSettings]) => {
         setApiUrl(url);
+        setAgentBaseUrl(agentUrl || '');
+        setAiSettings(persistedAiSettings || defaultAiSettings);
+        setAiSettingsLoaded(true);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err));
+        setAiSettingsLoaded(true);
       });
-  }, []);
+  }, [isBrowserPreview]);
 
   useEffect(() => {
-    setHasHydratedAiConversation(true);
-  }, []);
+    if (!aiSettingsLoaded || !window.electronAPI?.saveAiSettings) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      window.electronAPI?.saveAiSettings?.(aiSettings).catch((err) => {
+        console.error('[AI Settings] Failed to persist settings:', err);
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [aiSettings, aiSettingsLoaded]);
+
+  useEffect(() => {
+    setAiConnectionProbe(null);
+    setAiConnectionProbeError('');
+  }, [
+    aiSettings.provider,
+    aiSettings.baseUrl,
+    aiSettings.apiKey,
+    aiSettings.model,
+  ]);
 
   const buildModelConnectionString = () => {
     const target = connectionString.trim();
@@ -1954,8 +2124,6 @@ export function App() {
 
   const handleOpenSettings = () => {
     setShowSettings(true);
-    setAiTestStatus('idle');
-    setAiTestMessage('');
   };
 
   const activateDataWorkbench = () => {
@@ -2208,52 +2376,6 @@ export function App() {
     }
   };
 
-  // Save settings
-  const handleSaveSettings = () => {
-    localStorage.setItem('vibeBiAiApiKey', aiApiKey);
-    localStorage.setItem('vibeBiAiProvider', aiProvider);
-    localStorage.setItem('vibeBiAiBaseUrl', aiBaseUrl);
-    localStorage.setItem('vibeBiAiModel', aiModel);
-    setShowSettings(false);
-  };
-
-  // Test AI connection
-  const handleTestAiConnection = async () => {
-    if (!aiApiKey) {
-      setAiTestStatus('error');
-      setAiTestMessage('请先输入 API Key');
-      return;
-    }
-
-    setAiTestStatus('testing');
-    setAiTestMessage('正在测试连接...');
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/test-connection`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': aiApiKey,
-          'X-API-BaseUrl': aiBaseUrl,
-          'X-API-Provider': aiProvider,
-          'X-API-Model': aiModel,
-        },
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        setAiTestStatus(result.ok ? 'success' : 'error');
-        setAiTestMessage(result.message || (result.ok ? '连接成功' : '连接失败'));
-      } else {
-        setAiTestStatus('error');
-        setAiTestMessage(`请求失败: ${response.statusText}`);
-      }
-    } catch (err) {
-      setAiTestStatus('error');
-      setAiTestMessage(err instanceof Error ? err.message : '测试连接时发生错误');
-    }
-  };
-
   const executeImportedQuery = async (dax: string): Promise<QueryResult> => {
     const response = await fetch(`${apiUrl}/api/query/execute`, {
       method: 'POST',
@@ -2336,6 +2458,12 @@ export function App() {
           hasQuery,
           isRendered: updates.isRendered ?? existing?.isRendered ?? false,
           sourceOrder: existing ? Math.min(existing.sourceOrder, sourceOrder) : sourceOrder,
+          queryMode: updates.queryMode ?? existing?.queryMode ?? 'import-json',
+          sourceLabel: updates.sourceLabel ?? existing?.sourceLabel ?? 'Performance Analyzer',
+          isVisible: updates.isVisible ?? existing?.isVisible ?? true,
+          fields: updates.fields ?? existing?.fields ?? [],
+          charts: updates.charts ?? existing?.charts ?? [],
+          previewResult: updates.previewResult ?? existing?.previewResult,
         };
 
         summaryMap.set(summaryKey, merged);
@@ -2870,10 +2998,12 @@ export function App() {
           selectedDax = execution.selectedDax;
           selectedEvaluateIndex = Math.max(evaluateQueries.findIndex((candidateQuery) => candidateQuery.trim() === selectedDax.trim()), 0);
           queryResult = execution.queryResult;
-          primeQueryCache(queryId, queryResult.rows);
-          console.log(
-            `[Import] Query executed: id="${queryId}", rows=${queryResult.rowCount}, evaluateCount=${countEvaluateStatements(queryText)}`
-          );
+          if (queryResult) {
+            primeQueryCache(queryId, queryResult.rows);
+            console.log(
+              `[Import] Query executed: id="${queryId}", rows=${queryResult.rowCount}, evaluateCount=${countEvaluateStatements(queryText)}`
+            );
+          }
         } catch (queryErr) {
           console.error(`[Import] Query execution failed for "${visualName}":`, queryErr);
         }
@@ -3204,380 +3334,6 @@ export function App() {
     }));
   };
 
-  type DatasetAssetDraft = {
-    report: ReportDefinition;
-    pages: PageDefinition[];
-    queries: QueryDefinition[];
-    renderedSummaryMap: Map<string, { queryId: string; componentId: string }>;
-  };
-
-  const buildDraftReportFromDatasetAssets = (
-    datasetAssets: ImportSummaryItem[],
-    options?: {
-      reportName?: string;
-      reportDescription?: string;
-      generationMode?: ReportDefinition['generationMode'];
-    }
-  ): DatasetAssetDraft | null => {
-    if (datasetAssets.length === 0) {
-      return null;
-    }
-
-    const reportId = `report-${Date.now()}`;
-    const pageId = `page-${Date.now()}`;
-    const newQueries: QueryDefinition[] = [];
-    const newComponents: PageDefinition['components'] = [];
-    const renderedSummaryMap = new Map<string, { queryId: string; componentId: string }>();
-    let cursorX = 0;
-    let cursorY = 0;
-    let rowHeight = 0;
-
-    const placeComponent = (width: number, height: number) => {
-      if (width >= 12) {
-        if (cursorX !== 0) {
-          cursorY += rowHeight;
-          cursorX = 0;
-          rowHeight = 0;
-        }
-
-        const position = { x: 0, y: cursorY, w: 12, h: height };
-        cursorY += height;
-        return position;
-      }
-
-      if (cursorX + width > 12) {
-        cursorY += rowHeight;
-        cursorX = 0;
-        rowHeight = 0;
-      }
-
-      const position = { x: cursorX, y: cursorY, w: width, h: height };
-      cursorX += width;
-      rowHeight = Math.max(rowHeight, height);
-
-      if (cursorX >= 12) {
-        cursorY += rowHeight;
-        cursorX = 0;
-        rowHeight = 0;
-      }
-
-      return position;
-    };
-
-    datasetAssets.forEach((item) => {
-      const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
-      if (!visibleChart) {
-        return;
-      }
-
-      const filteredResult = filterQueryResultByVisibleFields(item.previewResult, item);
-      const queryText = item.executionDax || item.fullQuery || '';
-      if (!queryText) {
-        return;
-      }
-
-      const queryId = item.queryId || `query-${item.id}`;
-      const componentId = item.componentId || `component-${visibleChart.id}`;
-      const componentType = visibleChart.componentType === 'filter' ? 'data-table' : visibleChart.componentType;
-      const chartType = resolveRenderableChartType(visibleChart.chartType);
-      const isHighPriority = item.score >= 15;
-      const isTable = componentType === 'data-table';
-      const isKpi = componentType === 'kpi-card';
-      const width = isTable ? 12 : isKpi ? 3 : isHighPriority ? 12 : 6;
-      const height = isTable ? 6 : isKpi ? 2 : isHighPriority ? 6 : 5;
-
-      newQueries.push({
-        id: queryId,
-        name: item.name,
-        dax: queryText,
-        executionDax: queryText,
-        evaluateQueries: item.evaluateQueries,
-        selectedEvaluateIndex: item.selectedEvaluateIndex,
-        parameters: [],
-      });
-
-      newComponents.push({
-        id: componentId,
-        type: componentType,
-        position: placeComponent(width, height),
-        queryRef: queryId,
-        config: buildComponentConfig(componentType, chartType, item.name, filteredResult),
-      });
-      renderedSummaryMap.set(item.id, { queryId, componentId });
-
-      if (filteredResult) {
-        primeQueryCache(queryId, filteredResult.rows);
-      }
-    });
-
-    if (newComponents.length === 0 || newQueries.length === 0) {
-      return null;
-    }
-
-    const reportName = options?.reportName?.trim()
-      || `${modelMetadata?.databaseName || '数据模型'} 自动报表`;
-    const reportDescription = options?.reportDescription?.trim()
-      || `基于 ${datasetAssets.length} 个可见数据集素材生成的报表草稿`;
-
-    return {
-      report: {
-        formatVersion: '1.0.0',
-        id: reportId,
-        name: reportName,
-        description: reportDescription,
-        createdAt: new Date().toISOString(),
-        modifiedAt: new Date().toISOString(),
-        generationMode: options?.generationMode || 'imported',
-        pages: [pageId],
-        defaultPage: pageId,
-        theme: sampleTheme,
-      },
-      pages: [{
-        id: pageId,
-        name: '素材草稿页面',
-        layout: {
-          type: 'grid',
-          columns: 12,
-          rowHeight: 60,
-          gap: 16,
-          padding: 24,
-        },
-        filters: [],
-        components: newComponents,
-      }],
-      queries: newQueries,
-      renderedSummaryMap,
-    };
-  };
-
-  const buildAssetDrivenPrompt = (
-    datasetAssets: ImportSummaryItem[],
-    draft: DatasetAssetDraft,
-    mode: 'model' | 'asset',
-    intent: string
-  ): string => {
-    const lines: string[] = [];
-    const normalizedIntent = intent.trim() || defaultGenerationPrompt;
-
-    lines.push('请基于当前上下文中的现有数据集素材和查询，重新设计成真正可交付的 BI 报表。');
-    lines.push(`触发来源: ${mode === 'model' ? '从模型生成' : '从素材生成'}`);
-    lines.push(`用户目标: ${normalizedIntent}`);
-    lines.push('');
-    lines.push('必须遵守的约束:');
-    lines.push('1. 只能使用 currentContext 中已有的 queries 作为数据来源，不要新增查询，不要修改 query id。');
-    lines.push('2. 优先复用 currentContext 中已有的组件 id；可以调整 type、title、config、position。');
-    lines.push('3. 需要返回完整的 report 和完整的 pages 数组，不能只返回说明文字。');
-    lines.push('4. 不要简单平均平铺，要通过主次层级、留白、分组、对齐和尺寸变化做出专业版式。');
-    lines.push('5. 优先使用全部可见素材；如果有次要素材，可以缩小或放到下方，但不要无故丢失。');
-    lines.push('6. 页面仍然使用 12 列网格系统。');
-    lines.push('');
-    lines.push('当前可见素材清单:');
-    datasetAssets.forEach((item, idx) => {
-      const visibleChart = item.charts.find((chart) => chart.isVisible) || item.charts[0];
-      const rendered = draft.renderedSummaryMap.get(item.id);
-      const visibleFields = item.fields.filter((field) => field.isVisible).map((field) => field.name);
-      lines.push(`${idx + 1}. 数据集: ${item.name}`);
-      lines.push(`   queryId: ${rendered?.queryId || item.queryId || `query-${item.id}`}`);
-      lines.push(`   componentId: ${rendered?.componentId || item.componentId || `component-${item.id}`}`);
-      lines.push(`   推荐图表: ${visibleChart?.chartType || item.type}`);
-      lines.push(`   行数: ${item.rowCount}, 评分: ${item.score.toFixed(1)}, 执行时间: ${item.executionTime.toFixed(0)}ms`);
-      lines.push(`   可见字段: ${visibleFields.join(', ') || '无'}`);
-      lines.push('');
-    });
-    lines.push('请输出修改后的完整 JSON，用于直接渲染最终报表。');
-
-    return lines.join('\n');
-  };
-
-  const applyAiDesignedAssetReport = (
-    draft: DatasetAssetDraft,
-    report: ReportDefinition,
-    pages: PageDefinition[],
-    completionMessage: string
-  ) => {
-    const validQueryIds = new Set(draft.queries.map((query) => query.id));
-    const draftComponentQueryMap = new Map(
-      draft.pages.flatMap((page) => page.components)
-        .filter((component) => component.queryRef)
-        .map((component) => [component.id, component.queryRef as string])
-    );
-    const invalidBindings: string[] = [];
-
-    const normalizedPages = pages.map((page) => ({
-      ...page,
-      components: page.components.map((component) => {
-        if (!component.queryRef) {
-          return component;
-        }
-        if (validQueryIds.has(component.queryRef)) {
-          return component;
-        }
-
-        const fallbackQueryRef = draftComponentQueryMap.get(component.id);
-        if (fallbackQueryRef && validQueryIds.has(fallbackQueryRef)) {
-          return {
-            ...component,
-            queryRef: fallbackQueryRef,
-          };
-        }
-
-        invalidBindings.push(`${page.id}/${component.id}:${component.queryRef}`);
-        return component;
-      }),
-    }));
-
-    if (invalidBindings.length > 0) {
-      throw new Error(`AI 返回了无法绑定现有素材查询的组件: ${invalidBindings.join(', ')}`);
-    }
-
-    const allComponents = normalizedPages.flatMap((page) => page.components);
-    const componentByQueryId = new Map(
-      allComponents
-        .filter((component) => component.queryRef)
-        .map((component) => [component.queryRef as string, component.id])
-    );
-    const availableComponentIds = new Set(allComponents.map((component) => component.id));
-    const defaultPageId = report.defaultPage && normalizedPages.some((page) => page.id === report.defaultPage)
-      ? report.defaultPage
-      : normalizedPages[0]?.id;
-
-    setGeneratedReport(normalizeReportForRuntime({
-      ...report,
-      pages: normalizedPages.map((page) => page.id),
-      defaultPage: defaultPageId,
-      modifiedAt: new Date().toISOString(),
-      generationMode: 'ai-generated',
-    }, sampleTheme));
-    setGeneratedPages(normalizedPages);
-    setGeneratedQueries(draft.queries);
-    setImportSummary((previous) => previous.map((item) => {
-      const rendered = draft.renderedSummaryMap.get(item.id);
-      if (!rendered) {
-        return item;
-      }
-
-      const nextComponentId = componentByQueryId.get(rendered.queryId) || rendered.componentId;
-      return {
-        ...item,
-        queryId: rendered.queryId,
-        componentId: nextComponentId,
-        isRendered: componentByQueryId.has(rendered.queryId) || availableComponentIds.has(nextComponentId),
-      };
-    }));
-    setActiveImportedComponentId(allComponents[0]?.id);
-    setWorkspaceMode('report');
-    setShowRightPane(true);
-    setGenerationProgress(completionMessage);
-    pushAiExecutionTrace(`执行完成：${completionMessage}`);
-  };
-
-  const generateReportWithAiFromDatasetAssets = async (
-    datasetAssets: ImportSummaryItem[],
-    mode: 'model' | 'asset',
-    intent: string
-  ): Promise<string> => {
-    if (!apiUrl) {
-      throw new Error('后端服务尚未就绪，请稍后再试。');
-    }
-
-    if (!isConnected) {
-      throw new Error('请先连接模型，再使用 AI 生成。');
-    }
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      handleOpenSettings();
-      throw new Error('请先配置 AI API Key（点击设置按钮）');
-    }
-
-    const draft = buildDraftReportFromDatasetAssets(datasetAssets, {
-      reportName: `${modelMetadata?.databaseName || '数据模型'} ${mode === 'model' ? 'AI 生成草稿' : '素材草稿'}`,
-      reportDescription: `等待 AI 基于 ${datasetAssets.length} 个可见素材完成设计`,
-      generationMode: 'imported',
-    });
-
-    if (!draft) {
-      throw new Error('可见素材缺少可执行查询，无法作为 AI 设计输入。');
-    }
-
-    setIsGenerating(true);
-    recordAiProgress('refining', `正在调用 AI 基于 ${datasetAssets.length} 个可见素材设计报表...`);
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/refine`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: buildAssetDrivenPrompt(datasetAssets, draft, mode, intent),
-          currentContext: {
-            report: draft.report,
-            pages: draft.pages,
-            queries: draft.queries,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`生成请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let applied = false;
-      let completionMessage = `AI 已基于 ${datasetAssets.length} 个素材完成报表设计。`;
-
-      for await (const json of readSseDataLines(reader)) {
-        const progress = parseAiProgressPayload(json);
-        if (!progress) {
-          continue;
-        }
-
-        recordAiProgress(progress.step, progress.message);
-
-        if (progress.step === 'error') {
-          throw new Error(progress.message || 'AI 设计失败');
-        }
-
-        if (progress.step === 'complete') {
-          if (!progress.report || !Array.isArray(progress.pages) || progress.pages.length === 0) {
-            throw new Error('AI 已返回完成状态，但没有给出可用的页面布局。');
-          }
-
-          applyAiDesignedAssetReport(
-            draft,
-            progress.report,
-            progress.pages,
-            progress.message || completionMessage
-          );
-          completionMessage = progress.message || completionMessage;
-          applied = true;
-        }
-      }
-
-      if (!applied) {
-        throw new Error('AI 未返回可用于渲染的最终报表。');
-      }
-
-      return completionMessage;
-    } catch (err) {
-      const message = `AI 设计失败: ${err instanceof Error ? err.message : String(err)}`;
-      recordAiProgress('error', message);
-      throw new Error(message);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
   // Disconnect
   const handleDisconnect = () => {
     setIsConnected(false);
@@ -3600,75 +3356,459 @@ export function App() {
     setActiveLeftPaneSection('start');
     setShowRightPane(true);
     setGenerationProgress('');
-    setChatMessages([]);
-    resetAiExecutionTrace();
     setChatInput('');
-    setAiComposerMode('generate-model');
-    setIsComposingPrompt(false);
+    setAiSessionId('');
+    setAiMessages([]);
+    setAiTraceMap({});
+    setAiActiveRunId(undefined);
+    setAiAgentError('');
   };
 
-  // Get current report/pages/queries - return null if nothing generated/imported
-  const currentReport = generatedReport;
-  const currentPages = generatedPages.length > 0 ? generatedPages : [];
-  const currentQueries = generatedQueries.length > 0 ? generatedQueries : [];
+  const currentReport = browserPreviewPayload?.report ?? generatedReport;
+  const currentPages = browserPreviewPayload?.pages?.length
+    ? browserPreviewPayload.pages
+    : generatedPages.length > 0
+      ? generatedPages
+      : [];
+  const currentQueries = browserPreviewPayload?.queries?.length
+    ? browserPreviewPayload.queries
+    : generatedQueries.length > 0
+      ? generatedQueries
+      : [];
   const currentTheme = React.useMemo(
-    () => mergeThemeWithFallback(currentReport?.theme),
-    [currentReport]
+    () => mergeThemeWithFallback(browserPreviewPayload?.theme ?? currentReport?.theme),
+    [browserPreviewPayload?.theme, currentReport]
   );
-  const aiConversationPersistencePayload = React.useMemo(() => ({
-    version: 1,
-    chatMessages: chatMessages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      timestamp: message.timestamp,
-    })),
-    chatInput,
-    aiComposerMode,
-    generationProgress,
-    context: {
-      workspaceMode,
-      connectionTarget: connectionString.trim() || undefined,
-      connectionDatabase: connectionDatabase.trim() || undefined,
-      modelName: modelMetadata?.databaseName || undefined,
-      reportId: currentReport?.id || undefined,
-      reportName: currentReport?.name || undefined,
-      pageCount: currentPages.length,
-      queryCount: currentQueries.length,
-    },
-  }), [
-    aiComposerMode,
-    chatInput,
-    chatMessages,
-    connectionDatabase,
+  const effectiveApiUrl = browserPreviewPayload?.apiBaseUrl || apiUrl;
+  const currentDataSource = React.useMemo<DataSourceConfig>(() => {
+    if (browserPreviewPayload?.dataSource) {
+      return browserPreviewPayload.dataSource;
+    }
+
+    return isConnected
+      ? {
+        type: 'local',
+        connection: {
+          server: connectionString,
+          database: modelMetadata?.databaseName || connectionDatabase || 'Default',
+        },
+      }
+      : sampleDataSource;
+  }, [
+    browserPreviewPayload?.dataSource,
+    isConnected,
     connectionString,
-    currentPages.length,
-    currentQueries.length,
-    currentReport,
-    generationProgress,
     modelMetadata?.databaseName,
-    workspaceMode,
+    connectionDatabase,
+  ]);
+  const agentDatasets = React.useMemo(
+    () => buildAgentDatasetContexts(importSummary),
+    [importSummary]
+  );
+  const baselineQueries = React.useMemo(
+    () => buildBaselineQueries(currentQueries, agentDatasets),
+    [currentQueries, agentDatasets]
+  );
+  const agentExecutionContext = React.useMemo<AgentExecutionContext>(() => ({
+    apiBaseUrl: effectiveApiUrl,
+    connectionString: buildModelConnectionString() || undefined,
+    modelMetadata,
+    datasets: agentDatasets,
+    currentReport,
+    currentPages,
+    currentQueries,
+    baselineQueries,
+    theme: currentTheme,
+  }), [
+    effectiveApiUrl,
+    buildModelConnectionString,
+    modelMetadata,
+    agentDatasets,
+    currentReport,
+    currentPages,
+    currentQueries,
+    baselineQueries,
+    currentTheme,
+  ]);
+  const aiTraces = React.useMemo(
+    () => Object.values(aiTraceMap).sort((left, right) => {
+      const leftTime = Date.parse(left.startedAt) || 0;
+      const rightTime = Date.parse(right.startedAt) || 0;
+      return leftTime - rightTime;
+    }),
+    [aiTraceMap]
+  );
+
+  const ensureAiSession = async (): Promise<string> => {
+    if (!agentBaseUrl) {
+      throw new Error('AI sidecar 未启动。');
+    }
+
+    if (aiSessionId) {
+      return aiSessionId;
+    }
+
+    const session = await createAgentSession(agentBaseUrl);
+    setAiSessionId(session.sessionId);
+    return session.sessionId;
+  };
+
+  const closeAiStream = React.useCallback(() => {
+    if (aiStreamRef.current) {
+      aiStreamRef.current.close();
+      aiStreamRef.current = null;
+    }
+  }, []);
+
+  const applyArtifactToWorkspace = React.useCallback((artifact: {
+    report: ReportDefinition;
+    pages: PageDefinition[];
+    queries: QueryDefinition[];
+    theme?: ThemeDefinition | null;
+  }) => {
+    setGeneratedReport(artifact.report);
+    setGeneratedPages(artifact.pages || []);
+    setGeneratedQueries(artifact.queries || []);
+    setGenerationProgress('AI 已生成新的报表产物。');
+    setWorkspaceMode('report');
+    setActiveLeftPaneSection('ai');
+    setShowRightPane(true);
+    setActiveRibbonTab('ai');
+  }, []);
+
+  const handleOpenBrowserPreview = React.useCallback(async () => {
+    if (!currentReport || currentPages.length === 0) {
+      return;
+    }
+
+    if (!window.electronAPI?.openBrowserPreview) {
+      setGenerationProgress('当前环境不支持在浏览器中打开报表。');
+      return;
+    }
+
+    try {
+      await window.electronAPI.openBrowserPreview({
+        report: currentReport,
+        pages: currentPages,
+        queries: currentQueries,
+        theme: currentTheme,
+        apiBaseUrl: effectiveApiUrl,
+        dataSource: currentDataSource,
+        activeComponentId: activeImportedComponentId,
+      });
+      setGenerationProgress('已在浏览器中打开当前报表。');
+    } catch (err) {
+      setGenerationProgress(`浏览器预览打开失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [
+    activeImportedComponentId,
+    currentDataSource,
+    currentPages,
+    currentQueries,
+    currentReport,
+    currentTheme,
+    effectiveApiUrl,
   ]);
 
-  useEffect(() => {
-    if (!hasHydratedAiConversation || !window.electronAPI?.writeAiConversationState) {
+  const handleAgentStreamEvent = React.useCallback((event: AgentStreamEvent) => {
+    if (!event.runId) {
       return;
     }
 
-    const fingerprint = JSON.stringify(aiConversationPersistencePayload);
-    if (lastPersistedAiConversationRef.current === fingerprint) {
-      return;
-    }
+    setAiTraceMap((previous) => {
+      const currentTrace = previous[event.runId!] || createInitialTrace(event.runId!);
+      let nextTrace = currentTrace;
 
-    lastPersistedAiConversationRef.current = fingerprint;
-    const persistedFileContent = JSON.stringify({
-      ...aiConversationPersistencePayload,
-      savedAt: new Date().toISOString(),
-    }, null, 2);
+      if (event.type === 'run-status') {
+        nextTrace = {
+          ...currentTrace,
+          status: event.status,
+          summary: event.message || currentTrace.summary,
+          title: currentTrace.title || 'AI 执行链路',
+          completedAt: event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled'
+            ? event.timestamp
+            : currentTrace.completedAt,
+          activeOperation: event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled'
+            ? undefined
+            : currentTrace.activeOperation,
+          logs: event.message
+            ? appendTraceLog(currentTrace.logs, {
+              id: `${event.runId}-status-${event.timestamp}-${event.status}`,
+              timestamp: event.timestamp,
+              level: event.status === 'failed' ? 'error' : event.status === 'cancelled' ? 'warning' : 'info',
+              message: event.message,
+              tag: '状态',
+            })
+            : currentTrace.logs,
+        };
+      }
 
-    window.electronAPI.writeAiConversationState(persistedFileContent).catch((err) => {
-      console.warn('[AI Conversation] Failed to persist session:', err);
+      if (event.type === 'step-started') {
+        const shouldResetIssues = event.stepId === 'validate';
+        nextTrace = {
+          ...currentTrace,
+          status: currentTrace.status === 'queued' ? 'running' : currentTrace.status,
+          summary: event.summary,
+          activeStepId: event.stepId,
+          activeOperation: event.title,
+          issues: shouldResetIssues ? [] : currentTrace.issues,
+          steps: upsertTraceStep(currentTrace.steps, {
+            stepId: event.stepId,
+            title: event.title,
+            status: 'running',
+            summary: event.summary,
+            startedAt: event.timestamp,
+          }),
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-step-start-${event.stepId}-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'activity',
+            message: event.summary,
+            stepId: event.stepId,
+            tag: event.title,
+          }),
+        };
+      }
+
+      if (event.type === 'step-completed') {
+        const completedStep = currentTrace.steps.find((item) => item.stepId === event.stepId);
+        nextTrace = {
+          ...currentTrace,
+          activeStepId: currentTrace.activeStepId === event.stepId ? undefined : currentTrace.activeStepId,
+          activeOperation: currentTrace.activeStepId === event.stepId ? undefined : currentTrace.activeOperation,
+          steps: upsertTraceStep(currentTrace.steps, {
+            stepId: event.stepId,
+            title: event.title,
+            status: event.status || 'completed',
+            summary: event.summary,
+            startedAt: completedStep?.startedAt,
+            details: event.details,
+            completedAt: event.timestamp,
+          }),
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-step-done-${event.stepId}-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: event.status === 'failed' ? 'error' : 'success',
+            message: event.summary,
+            stepId: event.stepId,
+            tag: event.title,
+          }),
+        };
+      }
+
+      if (event.type === 'validation-issue') {
+        const nextIssues = currentTrace.issues.includes(event.issue)
+          ? currentTrace.issues
+          : [...currentTrace.issues, event.issue];
+        nextTrace = {
+          ...currentTrace,
+          issues: nextIssues,
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-issue-${event.timestamp}-${currentTrace.issues.length}`,
+            timestamp: event.timestamp,
+            level: 'warning',
+            message: event.issue,
+            tag: '校验',
+          }),
+        };
+      }
+
+      if (event.type === 'repair-started') {
+        nextTrace = {
+          ...currentTrace,
+          status: 'repairing',
+          summary: event.summary,
+          activeOperation: '修复中',
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-repair-start-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'activity',
+            message: event.summary,
+            tag: '修复',
+          }),
+        };
+      }
+
+      if (event.type === 'repair-completed') {
+        nextTrace = {
+          ...currentTrace,
+          status: 'running',
+          summary: event.summary,
+          activeOperation: '重新校验',
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-repair-done-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'success',
+            message: event.summary,
+            tag: '修复',
+          }),
+        };
+      }
+
+      if (event.type === 'artifact-produced') {
+        nextTrace = {
+          ...currentTrace,
+          artifactReady: true,
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-artifact-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'success',
+            message: '报表产物已经生成并回写到当前工作区。',
+            tag: '产物',
+          }),
+        };
+      }
+
+      if (event.type === 'run-failed') {
+        nextTrace = {
+          ...currentTrace,
+          status: 'failed',
+          summary: event.error,
+          completedAt: event.timestamp,
+          issues: [...currentTrace.issues, event.error],
+          activeStepId: undefined,
+          activeOperation: undefined,
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-failed-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'error',
+            message: event.error,
+            tag: '失败',
+          }),
+        };
+      }
+
+      if (event.type === 'progress') {
+        nextTrace = {
+          ...currentTrace,
+          summary: event.message,
+          activeStepId: event.stepId || currentTrace.activeStepId,
+          activeOperation: event.tag || currentTrace.activeOperation,
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-progress-${event.timestamp}-${currentTrace.logs.length}`,
+            timestamp: event.timestamp,
+            level: event.level || 'info',
+            message: event.message,
+            stepId: event.stepId,
+            tag: event.tag,
+          }),
+        };
+      }
+
+      if (event.type === 'heartbeat') {
+        nextTrace = {
+          ...currentTrace,
+          summary: event.message,
+          activeStepId: event.stepId || currentTrace.activeStepId,
+          activeOperation: event.tag || currentTrace.activeOperation,
+          lastHeartbeatAt: event.timestamp,
+          logs: appendTraceLog(currentTrace.logs, {
+            id: `${event.runId}-heartbeat-${event.timestamp}`,
+            timestamp: event.timestamp,
+            level: 'info',
+            message: event.message,
+            stepId: event.stepId,
+            tag: event.tag || '等待',
+          }),
+        };
+      }
+
+      return {
+        ...previous,
+        [event.runId!]: nextTrace,
+      };
     });
-  }, [aiConversationPersistencePayload, hasHydratedAiConversation]);
+
+    if (event.type === 'assistant-message') {
+      setAiMessages((previous) => {
+        const existingIndex = previous.findIndex((item) => item.id === event.messageId);
+        if (existingIndex >= 0) {
+          const next = [...previous];
+          next[existingIndex] = {
+            ...next[existingIndex],
+            content: event.content,
+            timestamp: event.timestamp,
+          };
+          return next;
+        }
+        return [
+          ...previous,
+          {
+            id: event.messageId,
+            role: 'assistant',
+            content: event.content,
+            timestamp: event.timestamp,
+            runId: event.runId,
+          },
+        ];
+      });
+      setAiActiveRunId(undefined);
+      setGenerationProgress('AI 已完成本轮回复。');
+    }
+
+    if (event.type === 'run-status') {
+      const statusText = event.message?.trim();
+      if (statusText) {
+        setAiMessages((previous) => appendSystemMessage(previous, statusText, event.timestamp, event.runId));
+      }
+    }
+
+    if (event.type === 'step-started') {
+      setAiMessages((previous) => appendSystemMessage(previous, `${event.title}：${event.summary}`, event.timestamp, event.runId));
+    }
+
+    if (event.type === 'progress') {
+      const prefix = event.tag ? `[${event.tag}] ` : '';
+      setAiMessages((previous) => appendSystemMessage(previous, `${prefix}${event.message}`, event.timestamp, event.runId));
+    }
+
+    if (event.type === 'heartbeat') {
+      setAiMessages((previous) => appendSystemMessage(previous, event.message, event.timestamp, event.runId));
+    }
+
+    if (event.type === 'artifact-produced') {
+      applyArtifactToWorkspace(event.artifact);
+    }
+
+    if (event.type === 'run-failed') {
+      setAiAgentError(event.error);
+      setAiActiveRunId(undefined);
+      setGenerationProgress(`AI 执行失败：${event.error}`);
+      setAiMessages((previous) => appendSystemMessage(previous, `执行失败：${event.error}`, event.timestamp, event.runId));
+    }
+
+    if (event.type === 'run-status' && (event.status === 'completed' || event.status === 'cancelled')) {
+      setAiActiveRunId(undefined);
+      if (event.status === 'cancelled') {
+        setGenerationProgress('AI 任务已取消。');
+      }
+    }
+  }, [applyArtifactToWorkspace]);
+
+  useEffect(() => {
+    if (!agentBaseUrl || !aiSessionId) {
+      closeAiStream();
+      return undefined;
+    }
+
+    closeAiStream();
+    const stream = openAgentSessionStream(
+      agentBaseUrl,
+      aiSessionId,
+      handleAgentStreamEvent,
+      (streamError) => {
+        setAiAgentError(streamError.message);
+      },
+    );
+    aiStreamRef.current = stream;
+
+    return () => {
+      stream.close();
+      if (aiStreamRef.current === stream) {
+        aiStreamRef.current = null;
+      }
+    };
+  }, [agentBaseUrl, aiSessionId, closeAiStream, handleAgentStreamEvent]);
 
   const queryBuilderMetadataGroups = React.useMemo(() => {
     const availableTables = modelMetadata?.tables ?? [];
@@ -3807,49 +3947,9 @@ export function App() {
   const hasReport = Boolean(currentReport && currentPages.length > 0);
   const hasImportedVisuals = importSummary.length > 0;
   const importableVisualCount = visibleDatasetAssets.length;
-  const isAiBusy = isGenerating || isRefining || isComposingPrompt;
   const effectiveReportCanvasZoomPercent = reportCanvasZoomMode === 'fit'
     ? reportCanvasFitZoomPercent
     : reportCanvasManualZoomPercent;
-
-  const appendChatMessage = (role: ChatMessage['role'], content: string) => {
-    setChatMessages((previous) => [
-      ...previous,
-      {
-        role,
-        content,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-  };
-
-  const resetAiExecutionTrace = () => {
-    setAiExecutionTraceLines([]);
-  };
-
-  const startAiExecutionTrace = (mode: AiComposerMode, intent: string) => {
-    setAiExecutionTraceLines(buildAiExecutionPlanLines(mode, intent));
-  };
-
-  const pushAiExecutionTrace = (line: string | null | undefined) => {
-    if (!line?.trim()) {
-      return;
-    }
-
-    setAiExecutionTraceLines((previous) => (
-      previous[previous.length - 1] === line
-        ? previous
-        : [...previous, line]
-    ));
-  };
-
-  const recordAiProgress = (step?: string, message?: string) => {
-    if (message || step) {
-      setGenerationProgress(message || step || '');
-    }
-
-    pushAiExecutionTrace(mapAiProgressToTraceLine(step, message));
-  };
 
   const applyReportCanvasManualZoom = (value: number) => {
     setReportCanvasZoomMode('manual');
@@ -3870,478 +3970,11 @@ export function App() {
     setReportCanvasZoomInputValue(String(effectiveReportCanvasZoomPercent));
   }, [effectiveReportCanvasZoomPercent]);
 
-  useEffect(() => {
-    const scrollContainer = aiConversationScrollRef.current;
-    if (!scrollContainer) {
-      return undefined;
-    }
-
-    const rafId = window.requestAnimationFrame(() => {
-      scrollContainer.scrollTo({
-        top: scrollContainer.scrollHeight,
-        behavior: 'smooth',
-      });
-    });
-
-    return () => window.cancelAnimationFrame(rafId);
-  }, [aiExecutionTraceLines, chatMessages, generationProgress]);
-
   const openAiWorkspace = () => {
     setWorkspaceMode('report');
     setActiveRibbonTab('ai');
     setActiveLeftPaneSection('ai');
     setShowRightPane(true);
-  };
-
-  const buildAiContextHint = (mode: AiGenerationMode) => {
-    const assetNames = visibleDatasetAssets
-      .slice(0, 5)
-      .map((item) => item.name)
-      .filter(Boolean);
-
-    const lines: string[] = [];
-    if (modelMetadata?.databaseName) {
-      lines.push(`模型名称: ${modelMetadata.databaseName}`);
-    }
-
-    if (mode === 'generate-asset') {
-      lines.push(`当前可见素材数: ${visibleDatasetAssets.length}`);
-      if (assetNames.length > 0) {
-        lines.push(`优先素材: ${assetNames.join('、')}`);
-      }
-    } else if (visibleDatasetAssets.length > 0) {
-      lines.push(`当前已有 ${visibleDatasetAssets.length} 个可见素材，可作为首版布局参考。`);
-    }
-
-    return lines.join('\n');
-  };
-
-  const buildModelGenerationStarterPrompt = () => {
-    const contextHint = buildAiContextHint('generate-model');
-    const lines: string[] = [
-      '请基于当前数据模型生成一份可直接展示的 BI 报表。',
-      '先主动完成一轮规划：明确主结论、核心指标、趋势关系、结构对比和异常提醒，再输出最终版式。',
-      '整体采用浅色、编辑式、具有设计感的视觉语言，强调主副层级、留白、节奏和叙事推进。',
-      '不要做成模板化平铺界面，要更像真正可交付的经营分析封面页或管理汇报页。',
-    ];
-
-    if (contextHint) {
-      lines.push(contextHint);
-    }
-
-    lines.push('');
-    lines.push('请优先组织出主视觉结论区、KPI 区、趋势区、结构对比区和异常提示区，并拉开体量差异。');
-    lines.push('标题和说明文案要像真实交付稿，不要使用空泛占位标题。');
-    lines.push('至少做出一个更有存在感的主视觉区块，不要所有卡片一样大。');
-    lines.push('生成完成前请自检主题、图表类型、字段映射、标题语义和布局是否匹配。');
-    lines.push('如果你认为还缺少关键偏好，请在结果 message 中给出后续可继续 уточ细的方向。');
-    lines.push('避免深色背景、避免平均分栏、避免紫色主导配色、避免把筛选器作为独立网格组件生成。');
-
-    return lines.join('\n');
-  };
-
-  const buildAssetGenerationStarterPrompt = () => {
-    const contextHint = buildAiContextHint('generate-asset');
-    const names = visibleDatasetAssets.slice(0, 4).map((item) => item.name).filter(Boolean);
-    const lines: string[] = [
-      '请基于当前可见素材生成一份最终可交付的 BI 报表。',
-      '先主动完成一轮规划，提炼最值得放大的主视觉结论，再安排辅助趋势、结构和明细。',
-      '不要只是把素材简单拼上去，而要重新组织成有主视觉、有层级、有呼吸感的页面。',
-      '整体采用浅色、编辑式、具有设计感的视觉语言，并保留关键素材的业务信息。',
-    ];
-
-    if (contextHint) {
-      lines.push(contextHint);
-    }
-
-    if (names.length > 0) {
-      lines.push(`当前最值得优先组织的素材: ${names.join('、')}。`);
-    }
-
-    lines.push('');
-    lines.push('尽量保留全部高价值素材，但可以重排大小、位置、图表类型和标题。');
-    lines.push('先形成结论，再展开趋势、结构和明细，避免平均分栏和平庸标题。');
-    lines.push('至少做出一个大体量的主区块和一个辅助信息带。');
-    lines.push('生成完成前请自检主题、图表类型、标题语义和组件层级是否真正落地。');
-    lines.push('避免深色背景、避免紫色主导配色、避免把筛选器作为独立网格组件生成。');
-
-    return lines.join('\n');
-  };
-
-  const buildRefinementStarterPrompt = () => {
-    if (!hasReport || !currentReport) {
-      return buildModelGenerationStarterPrompt();
-    }
-
-    return [
-      `请继续优化当前报表《${currentReport.name}》。`,
-      '先分析当前页面结构，再决定应该调整主题、图表类型、布局还是标题文案，并持续自检直到结果真实落地。',
-      '优先改进布局、图表类型、标题文案、浅色视觉层次和重点信息表达，不要脱离现有数据上下文。',
-      '避免平均分栏和平庸标题，优先增强视觉主次、留白和结论表达。',
-    ].join('\n');
-  };
-  const buildDefaultGenerationIntent = (mode: AiGenerationMode) => (
-    mode === 'generate-asset'
-      ? buildAssetGenerationStarterPrompt()
-      : buildModelGenerationStarterPrompt()
-  );
-
-  const openAiGenerationWorkspace = (mode: AiGenerationMode) => {
-    openAiWorkspace();
-    setAiComposerMode(mode);
-    setGenerationProgress('');
-    resetAiExecutionTrace();
-    if (chatMessages.length === 0) {
-      setChatInput('');
-    }
-  };
-
-  const prepareAiComposer = (mode: AiComposerMode, presetPrompt: string) => {
-    openAiWorkspace();
-    setAiComposerMode(mode);
-    setChatInput(presetPrompt);
-    resetAiExecutionTrace();
-    setGenerationProgress(
-      mode === 'refine'
-        ? '已填入一条修改建议，可继续编辑后发送。'
-        : '已填入一条提示词，可继续编辑后发送。'
-    );
-  };
-
-  const composePromptWithAi = async (mode: AiGenerationMode): Promise<string> => {
-    if (!apiUrl) {
-      throw new Error('后端服务尚未就绪，请稍后再试。');
-    }
-
-    if (!isConnected) {
-      throw new Error('请先连接模型，再生成提示词。');
-    }
-
-    if (mode === 'generate-asset' && visibleDatasetAssets.length === 0) {
-      throw new Error('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
-    }
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      handleOpenSettings();
-      throw new Error('请先配置 AI API Key（点击设置按钮）');
-    }
-
-    setIsComposingPrompt(true);
-    startAiExecutionTrace(
-      mode,
-      mode === 'generate-asset'
-        ? '基于当前可见素材整理一条首轮提示词。'
-        : '基于当前数据模型整理一条首轮提示词。'
-    );
-    recordAiProgress('building_prompt', 'AI 正在整理首轮提示词...');
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/compose-prompt`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          mode,
-          userIntent: mode === 'generate-asset'
-            ? '基于当前可见素材，整理一条高质量的报表生成提示词。'
-            : '基于当前数据模型，整理一条高质量的报表生成提示词。',
-          assets: visibleDatasetAssets.slice(0, 10).map((item) => ({
-            name: item.name,
-            chartType: item.charts.find((chart) => chart.isVisible)?.chartType || item.charts[0]?.chartType || item.type,
-            rowCount: item.rowCount,
-            score: item.score,
-            visibleFields: item.fields.filter((field) => field.isVisible).map((field) => field.name),
-          })),
-          currentContext: hasReport && currentReport
-            ? {
-              report: currentReport,
-              pages: currentPages,
-              queries: currentQueries,
-            }
-            : undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || `生成提示词失败: ${response.statusText}`);
-      }
-
-      const prompt = parseComposePromptResponse(await response.text());
-      if (!prompt) {
-        throw new Error('AI 未返回可编辑的提示词。');
-      }
-
-      setAiComposerMode(mode);
-      setChatInput(prompt);
-      recordAiProgress('complete', 'AI 已生成首轮提示词，可继续编辑后发送。');
-      return prompt;
-    } catch (err) {
-      const message = `生成提示词失败: ${err instanceof Error ? err.message : String(err)}`;
-      recordAiProgress('error', message);
-      throw new Error(message);
-    } finally {
-      setIsComposingPrompt(false);
-    }
-  };
-
-  const generateReportFromModelWithAi = async (intent: string): Promise<string> => {
-    if (!apiUrl) {
-      throw new Error('后端服务尚未就绪，请稍后再试。');
-    }
-
-    if (!isConnected) {
-      throw new Error('请先连接模型，再进行 AI 生成。');
-    }
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      handleOpenSettings();
-      throw new Error('请先配置 AI API Key（点击设置按钮）');
-    }
-
-    const prompt = intent.trim() || defaultGenerationPrompt;
-
-    setIsGenerating(true);
-    recordAiProgress('generating', '开始生成报表...');
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: prompt,
-          pageCount: 1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`生成请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let applied = false;
-      let completionMessage = '报表已生成。';
-
-      for await (const json of readSseDataLines(reader)) {
-        const progress = parseAiProgressPayload(json);
-        if (!progress) {
-          continue;
-        }
-
-        recordAiProgress(progress.step, progress.message);
-
-        if (progress.step === 'error') {
-          throw new Error(progress.message || 'AI 生成失败');
-        }
-
-        if (progress.step === 'complete' && progress.report) {
-          const nextPages = Array.isArray(progress.pages) ? progress.pages : [];
-          const nextQueries = Array.isArray(progress.queries) ? progress.queries : [];
-          const nextReport = normalizeReportForRuntime(progress.report, sampleTheme);
-
-          if (nextPages.length === 0) {
-            throw new Error('AI 已完成生成，但没有返回任何报表页面。');
-          }
-
-          setGeneratedReport(nextReport);
-          setGeneratedPages(nextPages);
-          setGeneratedQueries(nextQueries);
-          setActiveImportedComponentId(undefined);
-          completionMessage = progress.message || `生成完成，共 ${nextPages.length} 个页面，${nextQueries.length} 个查询。`;
-          recordAiProgress('complete', completionMessage);
-          applied = true;
-        }
-      }
-
-      if (!applied) {
-        throw new Error('AI 未返回可用于渲染的最终报表。');
-      }
-
-      return completionMessage;
-    } catch (err) {
-      const message = `生成失败: ${err instanceof Error ? err.message : String(err)}`;
-      recordAiProgress('error', message);
-      throw new Error(message);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const refineReportWithAi = async (intent: string): Promise<string> => {
-    if (!apiUrl) {
-      throw new Error('后端服务尚未就绪，请稍后再试。');
-    }
-
-    if (!isConnected) {
-      throw new Error('请先连接模型，再进行 AI 修改。');
-    }
-
-    if (!currentReport || currentPages.length === 0) {
-      throw new Error('当前还没有可修改的报表，请先发送首轮生成请求。');
-    }
-
-    const apiKey = localStorage.getItem('vibeBiAiApiKey');
-    if (!apiKey) {
-      handleOpenSettings();
-      throw new Error('请先配置 AI API Key（点击设置按钮）');
-    }
-
-    setIsRefining(true);
-    recordAiProgress('refining', '正在应用 AI 修改...');
-
-    try {
-      const response = await fetch(`${apiUrl}/api/ai/refine`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-          'X-API-BaseUrl': localStorage.getItem('vibeBiAiBaseUrl') || '',
-          'X-API-Model': localStorage.getItem('vibeBiAiModel') || '',
-        },
-        body: JSON.stringify({
-          connectionString: buildModelConnectionString(),
-          userPrompt: intent,
-          currentContext: {
-            report: currentReport,
-            pages: currentPages,
-            queries: currentQueries,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`优化请求失败: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let applied = false;
-      let completionMessage = '报表已更新。';
-
-      for await (const json of readSseDataLines(reader)) {
-        const progress = parseAiProgressPayload(json);
-        if (!progress) {
-          continue;
-        }
-
-        recordAiProgress(progress.step, progress.message);
-
-        if (progress.step === 'error') {
-          throw new Error(progress.message || 'AI 修改失败');
-        }
-
-        if (progress.step === 'complete' && progress.report) {
-          const nextPages = Array.isArray(progress.pages) ? progress.pages : currentPages;
-          const nextQueries = Array.isArray(progress.queries) ? progress.queries : currentQueries;
-          const nextReport = normalizeReportForRuntime(progress.report, currentTheme);
-          const actualMessage = summarizeAppliedChanges(
-            currentReport,
-            currentPages,
-            currentQueries,
-            nextReport,
-            nextPages,
-            nextQueries,
-            intent,
-            progress.message
-          );
-
-          setGeneratedReport(nextReport);
-          setGeneratedPages(nextPages);
-          setGeneratedQueries(nextQueries);
-          completionMessage = actualMessage;
-          recordAiProgress('complete', completionMessage);
-          applied = true;
-        }
-      }
-
-      if (!applied) {
-        throw new Error('AI 未返回更新后的报表。');
-      }
-
-      return completionMessage;
-    } catch (err) {
-      const message = `修改失败: ${err instanceof Error ? err.message : String(err)}`;
-      recordAiProgress('error', message);
-      throw new Error(message);
-    } finally {
-      setIsRefining(false);
-    }
-  };
-
-  const runAiGenerationRequest = async (mode: AiGenerationMode, intent: string): Promise<string> => {
-    if (mode === 'generate-asset') {
-      if (visibleDatasetAssets.length === 0) {
-        throw new Error('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
-      }
-
-      return generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'asset', intent);
-    }
-
-    return visibleDatasetAssets.length > 0
-      ? generateReportWithAiFromDatasetAssets(visibleDatasetAssets, 'model', intent)
-      : generateReportFromModelWithAi(intent);
-  };
-
-  const submitAiConversationTurn = async (
-    intent: string,
-    options?: {
-      mode?: AiComposerMode;
-      displayContent?: string;
-    }
-  ) => {
-    const trimmedIntent = intent.trim();
-    if (!trimmedIntent || isAiBusy) {
-      return;
-    }
-
-    const hasCurrentReport = Boolean(currentReport && currentPages.length > 0);
-    const requestedMode = options?.mode
-      || (!hasCurrentReport && aiComposerMode === 'refine' ? 'generate-model' : aiComposerMode);
-    const displayContent = options?.displayContent?.trim() || trimmedIntent;
-
-    appendChatMessage('user', displayContent);
-    startAiExecutionTrace(requestedMode, trimmedIntent);
-
-    try {
-      const assistantMessage = requestedMode === 'refine'
-        ? await refineReportWithAi(trimmedIntent)
-        : await runAiGenerationRequest(requestedMode, trimmedIntent);
-
-      setAiComposerMode('refine');
-      appendChatMessage('assistant', assistantMessage);
-    } catch (err) {
-      appendChatMessage('assistant', err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleSendChatMessage = async () => {
-    if (!chatInput.trim() || isAiBusy) {
-      return;
-    }
-
-    const userMessage = chatInput.trim();
-    setChatInput('');
-    await submitAiConversationTurn(userMessage);
   };
   const ribbonTabs: Array<{ id: RibbonTabId; label: string; color: string }> = [
     { id: 'home', label: '主页', color: '#22C983' },
@@ -4374,7 +4007,7 @@ export function App() {
     if (!selectedDataset.isVisible) {
       return (
         <div style={{ color: shellPalette.warning, fontSize: 12, lineHeight: 1.7 }}>
-          当前数据集已隐藏，不会参与 AI 报表生成。重新设为可见后才会恢复预览联动。
+          当前数据集已隐藏。重新设为可见后才会恢复预览联动。
         </div>
       );
     }
@@ -4751,6 +4384,15 @@ export function App() {
   });
   const reportCanvasHeaderActions = hasReport ? (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      <button
+        type="button"
+        onClick={() => {
+          void handleOpenBrowserPreview();
+        }}
+        style={reportCanvasControlButtonStyle()}
+      >
+        在浏览器中打开
+      </button>
       <InfoPill label="画布" value={`${DEFAULT_REPORT_CANVAS_WIDTH} × ${DEFAULT_REPORT_CANVAS_HEIGHT}`} />
       <button
         type="button"
@@ -4871,72 +4513,220 @@ export function App() {
     </RightPaneSurface>
   );
 
-  const handleDirectGenerateFromEmptyState = async () => {
-    const generationMode: AiGenerationMode = aiComposerMode === 'generate-asset'
-      ? 'generate-asset'
-      : 'generate-model';
+  const handleClearAiSession = () => {
+    setChatInput('');
+    setAiMessages([]);
+    setAiTraceMap({});
+    setAiActiveRunId(undefined);
+    setAiAgentError('');
+    setGenerationProgress('');
+    setAiSessionId('');
+    closeAiStream();
+  };
 
-    await submitAiConversationTurn(buildDefaultGenerationIntent(generationMode), {
-      mode: generationMode,
-      displayContent: generationMode === 'generate-asset'
-        ? '直接基于当前可见素材生成一版报表。'
-        : '直接基于当前模型生成一版报表。',
+  const handleCancelAiRun = async () => {
+    if (!agentBaseUrl || !aiActiveRunId) {
+      return;
+    }
+
+    try {
+      await cancelAgentRun(agentBaseUrl, aiActiveRunId);
+    } catch (cancelError) {
+      setAiAgentError(cancelError instanceof Error ? cancelError.message : String(cancelError));
+    }
+  };
+
+  const submitAiTask = async (
+    messageInput?: string,
+    options?: {
+      displayMessage?: string;
+      clearInput?: boolean;
+    },
+  ) => {
+    const message = (messageInput ?? chatInput).trim();
+    if (!message) {
+      return;
+    }
+
+    if (!aiSettings.baseUrl.trim() || !aiSettings.apiKey.trim() || !aiSettings.model.trim()) {
+      setAiAgentError('请先在设置中填写 AI baseUrl、API key 和模型名称。');
+      setActiveSettingsTab('ai');
+      setShowSettings(true);
+      return;
+    }
+
+    try {
+      setAiAgentError('');
+      const sessionId = await ensureAiSession();
+      const localUserMessage: AiMessage = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: options?.displayMessage?.trim() || message,
+        timestamp: new Date().toISOString(),
+      };
+      setAiMessages((previous) => [...previous, localUserMessage]);
+      if (options?.clearInput !== false) {
+        setChatInput('');
+      }
+      setGenerationProgress('AI 正在规划执行路径...');
+      const payload = {
+        message,
+        settings: aiSettings,
+        context: agentExecutionContext,
+      };
+
+      let run;
+      try {
+        run = await submitAgentMessage(agentBaseUrl, sessionId, payload);
+      } catch (submitError) {
+        const errorText = submitError instanceof Error ? submitError.message : String(submitError);
+        const shouldRecoverSession = errorText.includes('会话不存在') || errorText.includes('HTTP 404') || errorText.includes('404');
+        if (!shouldRecoverSession) {
+          throw submitError;
+        }
+
+        setAiSessionId('');
+        closeAiStream();
+        const recoveredSession = await createAgentSession(agentBaseUrl);
+        setAiSessionId(recoveredSession.sessionId);
+        run = await submitAgentMessage(agentBaseUrl, recoveredSession.sessionId, payload);
+      }
+      setAiActiveRunId(run.runId);
+      setAiTraceMap((previous) => ({
+        ...previous,
+        [run.runId]: previous[run.runId] || createInitialTrace(run.runId),
+      }));
+    } catch (sendError) {
+      const messageText = sendError instanceof Error ? sendError.message : String(sendError);
+      setAiAgentError(messageText);
+      setGenerationProgress(`AI 执行失败：${messageText}`);
+    }
+  };
+
+  const handleSendChatMessage = async () => {
+    await submitAiTask();
+  };
+
+  const handleDirectGenerateReport = async () => {
+    if (!isConnected) {
+      setAiAgentError('请先连接模型后再生成报表。');
+      openAiWorkspace();
+      return;
+    }
+
+    if (importSummary.length === 0) {
+      setAiAgentError('请先导入至少一个数据集，再让 AI 直接生成报表。');
+      openAiWorkspace();
+      return;
+    }
+
+    openAiWorkspace();
+    setAiDesignAskedFields([]);
+    const firstQuestion = buildAiDesignQuestions(importSummary, aiDesignIntakeDraft, [])[0] || null;
+    setAiDesignPendingQuestion(firstQuestion);
+    setAiMessages((previous) => [
+      ...previous,
+      {
+        id: `assistant-design-${Date.now()}`,
+        role: 'assistant',
+        content: '生成前我先问你几个简短问题，确认这版报表的风格方向，再开始生成。',
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+  };
+
+  const handleConfirmAiDesignIntake = async () => {
+    const prompt = buildGuidedGeneratePrompt(importSummary.length, aiDesignIntakeDraft);
+    const displayMessage = buildGuidedGenerateDisplayMessage(aiDesignIntakeDraft);
+    setAiDesignPendingQuestion(null);
+    openAiWorkspace();
+    await submitAiTask(prompt, {
+      displayMessage,
+      clearInput: true,
     });
   };
 
-  const handleComposePromptFromEmptyState = async () => {
-    const generationMode: AiGenerationMode = aiComposerMode === 'generate-asset'
-      ? 'generate-asset'
-      : 'generate-model';
+  const handleSelectAiDesignOption = async (value: string) => {
+    const question = aiDesignPendingQuestion;
+    if (!question) {
+      return;
+    }
 
-    await composePromptWithAi(generationMode);
+    const nextDraft = {
+      ...aiDesignIntakeDraft,
+      [question.field]: value,
+    } as AiDesignIntakeDraft;
+    setAiDesignIntakeDraft(nextDraft);
+    const nextAsked = [...aiDesignAskedFields, question.field];
+    setAiDesignAskedFields(nextAsked);
+    setAiMessages((previous) => [
+      ...previous,
+      {
+        id: `user-design-${Date.now()}`,
+        role: 'user',
+        content: `${question.title}：${question.options.find((option) => option.value === value)?.label || value}`,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    const nextQuestion = buildAiDesignQuestions(importSummary, nextDraft, nextAsked)[0] || null;
+    setAiDesignPendingQuestion(nextQuestion);
+    if (!nextQuestion) {
+      await handleConfirmAiDesignIntake();
+    }
   };
 
-  const renderAiExecutionTrace = () => (
-    aiExecutionTraceLines.length > 0 ? (
-      <div
-        style={{
-          display: 'grid',
-          gap: 8,
-          marginBottom: 10,
-          padding: '12px 12px 10px',
-          borderRadius: 12,
-          background: 'linear-gradient(180deg, #F8FAFC 0%, #EEF2FF 100%)',
-          border: '1px solid #C7D2FE',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: '#4338CA' }}>
-            AI 规划与执行
-          </span>
-          <span style={{ fontSize: 10, color: shellPalette.textSubtle }}>
-            {isAiBusy ? '执行中' : '已完成'}
-          </span>
-        </div>
-        <div style={{ display: 'grid', gap: 6 }}>
-          {aiExecutionTraceLines.map((line, index) => (
-            <div
-              key={`${line}-${index}`}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '16px minmax(0, 1fr)',
-                gap: 8,
-                alignItems: 'flex-start',
-                color: shellPalette.text,
-                fontSize: 12,
-                lineHeight: 1.7,
-              }}
-            >
-              <span style={{ color: '#4F46E5', fontWeight: 700 }}>
-                {index + 1}.
-              </span>
-              <span style={{ wordBreak: 'break-word' }}>{line}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    ) : null
-  );
+  const handleSkipAiDesignQuestion = async () => {
+    const question = aiDesignPendingQuestion;
+    if (!question) {
+      return;
+    }
+
+    const nextAsked = [...aiDesignAskedFields, question.field];
+    setAiDesignAskedFields(nextAsked);
+    setAiMessages((previous) => [
+      ...previous,
+      {
+        id: `user-design-skip-${Date.now()}`,
+        role: 'user',
+        content: `${question.title}：跳过`,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    const nextQuestion = buildAiDesignQuestions(importSummary, aiDesignIntakeDraft, nextAsked)[0] || null;
+    setAiDesignPendingQuestion(nextQuestion);
+    if (!nextQuestion) {
+      await handleConfirmAiDesignIntake();
+    }
+  };
+
+  const handleTestAiConnection = async () => {
+    if (!agentBaseUrl) {
+      setAiConnectionProbe(null);
+      setAiConnectionProbeError('AI sidecar 尚未启动。');
+      return;
+    }
+
+    if (!aiSettings.baseUrl.trim() || !aiSettings.apiKey.trim() || !aiSettings.model.trim()) {
+      setAiConnectionProbe(null);
+      setAiConnectionProbeError('请先完整填写 AI baseUrl、API key 和模型名称。');
+      setActiveSettingsTab('ai');
+      return;
+    }
+
+    try {
+      setIsTestingAiConnection(true);
+      setAiConnectionProbeError('');
+      const result = await probeAgentConnection(agentBaseUrl, aiSettings);
+      setAiConnectionProbe(result);
+    } catch (probeError) {
+      setAiConnectionProbe(null);
+      setAiConnectionProbeError(probeError instanceof Error ? probeError.message : String(probeError));
+    } finally {
+      setIsTestingAiConnection(false);
+    }
+  };
 
   const renderRightPaneContent = () => {
     if (activeLeftPaneSection === 'import') {
@@ -4998,284 +4788,45 @@ export function App() {
     }
 
     if (activeLeftPaneSection === 'ai') {
-      const aiPlaceholder = hasReport
-        ? '输入你想继续修改的内容，Ctrl+Enter 发送'
-        : aiComposerMode === 'generate-asset'
-          ? '输入你希望如何基于当前素材生成报表，Ctrl+Enter 发送'
-          : '输入你希望 AI 生成什么样的报表，Ctrl+Enter 发送';
-      const shouldShowGenerationActions = chatMessages.length === 0
-        && !chatInput.trim()
-        && aiComposerMode !== 'refine'
-        && !isAiBusy;
-
       return renderRightPaneShell('AI 对话', (
-        <div
-          style={{
-            height: '100%',
-            minHeight: 0,
-            display: 'grid',
-            gridTemplateRows: 'minmax(0, 1fr) 196px',
-            gap: 10,
-          }}
-        >
-          <div
-            ref={aiConversationScrollRef}
-            style={{
-              height: '100%',
-              minHeight: 0,
-              overflow: 'auto',
-              padding: 12,
-            }}
-          >
-            {renderAiExecutionTrace()}
-            {chatMessages.length === 0 ? (
-              shouldShowGenerationActions ? (
-                <div
-                  style={{
-                    height: '100%',
-                    minHeight: 220,
-                    display: 'grid',
-                    alignContent: 'center',
-                    gap: 14,
-                    padding: '0 8px',
-                  }}
-                >
-                  <div style={{ textAlign: 'center', color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.7 }}>
-                    先选择一种开始方式，再进入真正的 AI 生成流程。
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => { void handleDirectGenerateFromEmptyState(); }}
-                    disabled={isAiBusy}
-                    style={{
-                      padding: '12px 16px',
-                      borderRadius: 12,
-                      border: 'none',
-                      background: isAiBusy ? '#E5E7EB' : shellPalette.accent,
-                      color: '#FFFFFF',
-                      fontSize: 13,
-                      fontWeight: 700,
-                      cursor: isAiBusy ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    直接生成报表
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { void handleComposePromptFromEmptyState(); }}
-                    disabled={isAiBusy}
-                    style={{
-                      padding: '12px 16px',
-                      borderRadius: 12,
-                      border: `1px solid ${shellPalette.accentBorder}`,
-                      background: shellPalette.accentSoft,
-                      color: shellPalette.accent,
-                      fontSize: 13,
-                      fontWeight: 700,
-                      cursor: isAiBusy ? 'not-allowed' : 'pointer',
-                      opacity: isAiBusy ? 0.7 : 1,
-                    }}
-                  >
-                    帮我生成提示词
-                  </button>
-                </div>
-              ) : (
-                <div
-                  style={{
-                    height: '100%',
-                    minHeight: 180,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    textAlign: 'center',
-                    color: shellPalette.textMuted,
-                    fontSize: 12,
-                    lineHeight: 1.7,
-                    padding: '0 18px',
-                  }}
-                >
-                  {chatInput.trim()
-                    ? '首轮提示词已放到下方输入框，可继续编辑后发送。'
-                    : '当前还没有对话，直接在下方输入你的要求即可。'}
-                </div>
-              )
-            ) : chatMessages.map((msg, idx) => (
-              <div
-                key={`${msg.timestamp}-${idx}`}
-                style={{
-                  display: 'grid',
-                  gap: 6,
-                  marginBottom: idx === chatMessages.length - 1 ? 0 : 10,
-                  padding: '12px',
-                  borderRadius: 12,
-                  background: msg.role === 'user'
-                    ? 'linear-gradient(180deg, #EFF6FF 0%, #DBEAFE 100%)'
-                    : 'linear-gradient(180deg, #FFF7ED 0%, #FFFBEB 100%)',
-                  border: `1px solid ${msg.role === 'user' ? '#BFDBFE' : '#FCD34D'}`,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 10,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: msg.role === 'user' ? shellPalette.accent : shellPalette.textMuted,
-                    }}
-                  >
-                    {msg.role === 'user' ? '你' : 'AI'}
-                  </span>
-                  <span style={{ fontSize: 10, color: shellPalette.textSubtle }}>
-                    {new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-                <div
-                  style={{
-                    color: shellPalette.text,
-                    fontSize: 12,
-                    lineHeight: 1.7,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {msg.content}
-                </div>
-                {msg.role === 'assistant' ? (
-                  <div
-                    style={{
-                      marginTop: 2,
-                      paddingTop: 8,
-                      borderTop: '1px dashed rgba(194, 65, 12, 0.22)',
-                      color: '#9A3412',
-                      fontSize: 11,
-                      lineHeight: 1.6,
-                      letterSpacing: 0.2,
-                    }}
-                  >
-                    继续告诉我想调整的布局、配色、重点指标、图表类型或筛选方式，我会沿着当前报表继续迭代。
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateRows: 'minmax(0, 1fr) auto',
-              gap: 12,
-              height: '100%',
-              borderTop: `1px solid ${shellPalette.border}`,
-              padding: '12px 12px 14px',
-              boxSizing: 'border-box',
-            }}
-          >
-            <div style={{ height: '100%', overflow: 'hidden' }}>
-              <textarea
-                value={chatInput}
-                onChange={(event) => setChatInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                    event.preventDefault();
-                    void handleSendChatMessage();
-                  }
-                }}
-                placeholder={aiPlaceholder}
-                disabled={isAiBusy}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  resize: 'none',
-                  border: `1px solid ${shellPalette.border}`,
-                  borderRadius: 10,
-                  background: '#FFFFFF',
-                  color: shellPalette.text,
-                  fontSize: 13,
-                  lineHeight: 1.7,
-                  padding: 12,
-                  boxSizing: 'border-box',
-                  outline: 'none',
-                  fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
-                }}
-              />
-            </div>
+        <div style={{ height: '100%', minHeight: 0, display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr)', gap: 10 }}>
+          {aiAgentError ? (
             <div
               style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-end',
-                gap: 10,
-                minHeight: 40,
+                margin: '0 12px',
+                padding: '10px 12px',
+                borderRadius: 10,
+                border: `1px solid rgba(180, 35, 53, 0.16)`,
+                background: shellPalette.errorSoft,
+                color: shellPalette.error,
+                fontSize: 12,
+                lineHeight: 1.6,
               }}
             >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setChatMessages([]);
-                    setChatInput('');
-                    setGenerationProgress('');
-                    resetAiExecutionTrace();
-                  }}
-                  disabled={isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0)}
-                  style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    border: `1px solid ${shellPalette.border}`,
-                    background: '#FFFFFF',
-                    color: shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0) ? 'not-allowed' : 'pointer',
-                    opacity: isAiBusy || (chatMessages.length === 0 && !chatInput.trim() && aiExecutionTraceLines.length === 0) ? 0.6 : 1,
-                  }}
-                >
-                  清空会话
-                </button>
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10 }}>
-                <button
-                  type="button"
-                  onClick={() => setChatInput('')}
-                  disabled={isAiBusy || !chatInput}
-                  style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    border: `1px solid ${shellPalette.border}`,
-                    background: '#FFFFFF',
-                    color: shellPalette.textMuted,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: isAiBusy || !chatInput ? 'not-allowed' : 'pointer',
-                    opacity: isAiBusy || !chatInput ? 0.6 : 1,
-                  }}
-                >
-                  清空输入
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { void handleSendChatMessage(); }}
-                  disabled={isAiBusy || !chatInput.trim()}
-                  style={{
-                    padding: '10px 18px',
-                    borderRadius: 10,
-                    border: 'none',
-                    background: isAiBusy ? '#EDEBE9' : shellPalette.accent,
-                    color: isAiBusy ? shellPalette.textSubtle : '#FFFFFF',
-                    fontSize: 13,
-                    fontWeight: 700,
-                    cursor: isAiBusy || !chatInput.trim() ? 'not-allowed' : 'pointer',
-                    opacity: isAiBusy || !chatInput.trim() ? 0.7 : 1,
-                  }}
-                >
-                  {isAiBusy ? '处理中...' : '发送'}
-                </button>
-              </div>
+              {aiAgentError}
             </div>
-          </div>
+          ) : null}
+          {!agentBaseUrl ? (
+            <div style={{ padding: 16, color: shellPalette.textMuted, fontSize: 12, lineHeight: 1.7 }}>
+              AI sidecar 尚未就绪。请检查桌面端主进程是否已成功启动 Python agent。
+            </div>
+          ) : (
+            <AiSessionPane
+              messages={aiMessages}
+              traces={aiTraces}
+              activeRunId={aiActiveRunId}
+              input={chatInput}
+              onInputChange={setChatInput}
+              onSend={() => { void handleSendChatMessage(); }}
+              onQuickGenerate={() => { void handleDirectGenerateReport(); }}
+              onCancel={() => { void handleCancelAiRun(); }}
+              onClear={handleClearAiSession}
+              isRunning={Boolean(aiActiveRunId)}
+              pendingQuestion={aiDesignPendingQuestion}
+              onSelectPendingOption={(value) => { void handleSelectAiDesignOption(value); }}
+              onSkipPendingQuestion={() => { void handleSkipAiDesignQuestion(); }}
+            />
+          )}
         </div>
       ), { bodyPadding: 0, bodyScrollable: false });
     }
@@ -5538,55 +5089,29 @@ export function App() {
         <>
           <RibbonGroup title="生成">
             <CommandButton
-              icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
-              label={isGenerating ? '生成中...' : '从模型生成'}
-              description="打开 AI 工作区，可直接生成或先让 AI 整理提示词"
-              onClick={() => {
-                openAiGenerationWorkspace('generate-model');
-              }}
-              disabled={isAiBusy}
+              icon={createGradientIcon('sparkle', '#2563EB', '#7C3AED')}
+              label="生成报表"
+              description="基于当前数据直接生成一版完整报表"
+              onClick={() => { void handleDirectGenerateReport(); }}
+              disabled={!isConnected || importSummary.length === 0 || Boolean(aiActiveRunId)}
+              tone="accent"
+              showDescription={false}
+            />
+          </RibbonGroup>
+          <RibbonGroup title="面板">
+            <CommandButton
+              icon={createGradientIcon('message', '#A78BFA', '#7C3AED')}
+              label="打开对话"
+              description="打开右侧 AI 对话面板"
+              onClick={openAiWorkspace}
               tone="accent"
               showDescription={false}
             />
             <CommandButton
-              icon={createGradientIcon('visual-library', '#7DD3FC', '#3B82F6')}
-              label="从素材生成"
-              description="打开 AI 工作区，基于当前可见素材生成报表"
-              onClick={() => {
-                if (importableVisualCount === 0) {
-                  openAiWorkspace();
-                  setAiComposerMode('generate-asset');
-                  setGenerationProgress('当前没有可用于 AI 排版的可见数据集素材。请至少保留一个可见数据集、图表和字段。');
-                  return;
-                }
-
-                openAiGenerationWorkspace('generate-asset');
-              }}
-              disabled={isAiBusy}
-              showDescription={false}
-            />
-          </RibbonGroup>
-          <RibbonGroup title="编辑">
-            <CommandButton
-              icon={createGradientIcon('refresh', '#818CF8', '#4F46E5')}
-              label="继续修改"
-              description="为当前报表预填一条修改建议，进入多轮对话"
-              onClick={() => {
-                prepareAiComposer('refine', buildRefinementStarterPrompt());
-              }}
-              showDescription={false}
-            />
-            <CommandButton
-              icon={createGradientIcon('message', '#FDBA74', '#F97316')}
-              label="打开会话"
-              description="仅切换到右侧 AI 会话区，不自动发送请求"
-              onClick={() => {
-                openAiWorkspace();
-                if (!chatInput.trim()) {
-                  setAiComposerMode(hasReport ? 'refine' : 'generate-model');
-                  setChatInput(hasReport ? buildRefinementStarterPrompt() : '');
-                }
-              }}
+              icon={createGradientIcon('refresh', '#7DD3FC', '#3B82F6')}
+              label="清空输入"
+              description="清空当前对话输入框"
+              onClick={() => setChatInput('')}
               showDescription={false}
             />
           </RibbonGroup>
@@ -5622,7 +5147,7 @@ export function App() {
             <CommandButton
               icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
               label="AI 面板"
-              description="定位到报表生成与微调设置"
+              description="定位到右侧 AI 对话面板"
               onClick={() => {
                 setActiveLeftPaneSection('ai');
                 setShowRightPane(true);
@@ -5671,7 +5196,7 @@ export function App() {
           <CommandButton
             icon={createGradientIcon('settings', '#FDBA74', '#F97316')}
             label="设置"
-            description="配置 AI Provider、Key 和代理地址"
+            description="打开系统设置"
             onClick={handleOpenSettings}
             showDescription={false}
           />
@@ -5695,7 +5220,7 @@ export function App() {
           <CommandButton
             icon={createGradientIcon('sparkle', '#A78BFA', '#7C3AED')}
             label="进入 AI"
-            description="切换到 AI 报表生成与微调工作区"
+            description="切换到 AI 对话面板"
             onClick={() => {
               handleRibbonTabChange('ai');
             }}
@@ -5705,6 +5230,60 @@ export function App() {
       </>
     );
   };
+
+  if (isBrowserPreview) {
+    if (error) {
+      return (
+        <div style={{ width: '100vw', minHeight: '100vh', background: shellPalette.appBg, color: shellPalette.error, padding: 24 }}>
+          <h1>浏览器预览失败</h1>
+          <p>{error}</p>
+        </div>
+      );
+    }
+
+    if (!browserPreviewPayload || !currentReport || currentPages.length === 0) {
+      return (
+        <div
+          style={{
+            width: '100vw',
+            minHeight: '100vh',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: shellPalette.appBg,
+            color: shellPalette.textMuted,
+            padding: 24,
+          }}
+        >
+          正在加载浏览器预览...
+        </div>
+      );
+    }
+
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          background: currentTheme.colors.background || shellPalette.appBg,
+          padding: 0,
+          boxSizing: 'border-box',
+        }}
+      >
+        <div style={{ width: '100%', margin: 0 }}>
+          <ReportRenderer
+            report={currentReport}
+            pages={currentPages}
+            queries={currentQueries}
+            theme={currentTheme}
+            dataSource={currentDataSource}
+            apiBaseUrl={effectiveApiUrl}
+            activeComponentId={browserPreviewPayload.activeComponentId}
+            viewportMode="document"
+          />
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (
@@ -5818,7 +5397,7 @@ export function App() {
                 title={hasReport ? (currentReport?.name || '报表画布') : '报表画布'}
                 subtitle={hasReport
                   ? `页面 ${currentPages.length} · 查询 ${currentQueries.length}${importSummary.length > 0 ? ` · 数据集 ${importSummary.length}` : ''}`
-                  : '连接模型、进入数据视图准备素材，或直接从 AI 工作区开始生成报表。'}
+                  : '连接模型，进入数据视图准备素材。'}
                 actions={reportCanvasHeaderActions}
               />
               {!apiUrl ? (
@@ -5858,8 +5437,8 @@ export function App() {
                       pages={currentPages}
                       queries={currentQueries}
                       theme={currentTheme}
-                      dataSource={isConnected ? { type: 'local', connection: { server: connectionString, database: modelMetadata?.databaseName || connectionDatabase || 'Default' } } : sampleDataSource}
-                      apiBaseUrl={apiUrl}
+                      dataSource={currentDataSource}
+                      apiBaseUrl={effectiveApiUrl}
                       activeComponentId={activeImportedComponentId}
                     />
                   </ReportCanvasViewport>
@@ -7079,191 +6658,262 @@ export function App() {
           <div style={{
             background: '#FFFFFF',
             border: '1px solid rgba(32, 31, 30, 0.12)',
-            borderRadius: 14,
+            borderRadius: 18,
             padding: 24,
-            width: 400,
+            width: 560,
             maxWidth: '90%',
             boxShadow: '0 24px 64px rgba(0, 0, 0, 0.18)',
           }} onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ color: '#201F1E', margin: '0 0 20px 0', fontSize: 18 }}>设置</h2>
+            <div style={{ display: 'grid', gap: 18 }}>
+              <div style={{ display: 'grid', gap: 10 }}>
+                <div style={{ color: '#201F1E', fontSize: 20, fontWeight: 800 }}>设置</div>
+                <div style={{ color: '#605E5C', fontSize: 12, lineHeight: 1.7 }}>
+                  按标签切换查看不同设置项。AI 设置用于模型连接，执行与自检用于控制链路行为。
+                </div>
+              </div>
 
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ color: '#605E5C', fontSize: 12, display: 'block', marginBottom: 6 }}>
-                AI Provider
-              </label>
-              <select
-                value={aiProvider}
-                onChange={(e) => setAiProvider(e.target.value)}
+              <div
                 style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  background: '#FFFFFF',
-                  border: '1px solid rgba(32, 31, 30, 0.14)',
-                  borderRadius: 8,
-                  color: '#201F1E',
-                  fontSize: 14,
-                  boxSizing: 'border-box',
-                }}
-              >
-                <option value="claude">Claude (Anthropic)</option>
-                <option value="openai">OpenAI</option>
-              </select>
-            </div>
-
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ color: '#605E5C', fontSize: 12, display: 'block', marginBottom: 6 }}>
-                API Key
-              </label>
-              <input
-                type="password"
-                value={aiApiKey}
-                onChange={(e) => setAiApiKey(e.target.value)}
-                placeholder="sk-..."
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  background: '#FFFFFF',
-                  border: '1px solid rgba(32, 31, 30, 0.14)',
-                  borderRadius: 8,
-                  color: '#201F1E',
-                  fontSize: 14,
-                  boxSizing: 'border-box',
-                }}
-              />
-              <p style={{ color: '#8A8886', fontSize: 11, margin: '6px 0 0' }}>
-                API Key 仅存储在本地浏览器中
-              </p>
-            </div>
-
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ color: '#605E5C', fontSize: 12, display: 'block', marginBottom: 6 }}>
-                Base URL (可选)
-              </label>
-              <input
-                type="text"
-                value={aiBaseUrl}
-                onChange={(e) => setAiBaseUrl(e.target.value)}
-                placeholder="https://api.anthropic.com 或自定义代理地址"
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  background: '#FFFFFF',
-                  border: '1px solid rgba(32, 31, 30, 0.14)',
-                  borderRadius: 8,
-                  color: '#201F1E',
-                  fontSize: 14,
-                  boxSizing: 'border-box',
-                }}
-              />
-              <p style={{ color: '#8A8886', fontSize: 11, margin: '6px 0 0' }}>
-                留空使用默认地址，支持自定义代理或本地模型
-              </p>
-            </div>
-
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ color: '#605E5C', fontSize: 12, display: 'block', marginBottom: 6 }}>
-                模型名称 (可选)
-              </label>
-              <input
-                type="text"
-                value={aiModel}
-                onChange={(e) => setAiModel(e.target.value)}
-                placeholder="claude-3-5-sonnet-20241022"
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  background: '#FFFFFF',
-                  border: '1px solid rgba(32, 31, 30, 0.14)',
-                  borderRadius: 8,
-                  color: '#201F1E',
-                  fontSize: 14,
-                  boxSizing: 'border-box',
-                }}
-              />
-              <p style={{ color: '#8A8886', fontSize: 11, margin: '6px 0 0' }}>
-                留空使用默认模型 (Claude: claude-3-5-sonnet-20241022)
-              </p>
-            </div>
-
-            {/* Test Connection */}
-            <div style={{ marginBottom: 20 }}>
-              <button
-                onClick={handleTestAiConnection}
-                disabled={aiTestStatus === 'testing' || !aiApiKey}
-                style={{
-                  width: '100%',
-                  padding: '10px',
-                  background: aiTestStatus === 'testing' ? '#EDEBE9' : '#0F6CBD',
-                  border: 'none',
-                  borderRadius: 8,
-                  color: '#fff',
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: aiTestStatus === 'testing' || !aiApiKey ? 'not-allowed' : 'pointer',
-                  marginBottom: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                }}
-              >
-                <ShellIcon name="connect" size={14} />
-                {aiTestStatus === 'testing' ? '测试中...' : '测试连接'}
-              </button>
-              {aiTestStatus !== 'idle' && (
-                <div style={{
-                  padding: 10,
-                  background: aiTestStatus === 'success' ? 'rgba(34, 197, 94, 0.1)' :
-                             aiTestStatus === 'testing' ? 'rgba(15, 108, 189, 0.1)' :
-                             'rgba(164, 38, 44, 0.1)',
-                  border: `1px solid ${aiTestStatus === 'success' ? 'rgba(34, 197, 94, 0.3)' :
-                                      aiTestStatus === 'testing' ? 'rgba(15, 108, 189, 0.3)' :
-                                      'rgba(164, 38, 44, 0.3)'}`,
-                  borderRadius: 6,
-                  color: aiTestStatus === 'success' ? '#22c55e' :
-                         aiTestStatus === 'testing' ? '#0F6CBD' :
-                         '#A4262C',
-                  fontSize: 12,
                   display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}>
-                  <span style={{ display: 'inline-flex' }}>
-                    <ShellIcon
-                      name={aiTestStatus === 'success'
-                        ? 'check-circle'
-                        : aiTestStatus === 'testing'
-                          ? 'pending-circle'
-                          : 'error-circle'}
-                      size={14}
+                  gap: 10,
+                  padding: 6,
+                  borderRadius: 14,
+                  background: 'linear-gradient(180deg, #F8FAFC 0%, #F1F5F9 100%)',
+                  border: '1px solid rgba(32, 31, 30, 0.08)',
+                }}
+              >
+                {[
+                  { id: 'ai' as const, label: 'AI 设置' },
+                  { id: 'runtime' as const, label: '执行与自检' },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveSettingsTab(tab.id)}
+                    style={{
+                      flex: 1,
+                      padding: '10px 12px',
+                      borderRadius: 10,
+                      border: 'none',
+                      background: activeSettingsTab === tab.id
+                        ? 'linear-gradient(135deg, #0F6CBD 0%, #2563EB 100%)'
+                        : 'transparent',
+                      color: activeSettingsTab === tab.id ? '#FFFFFF' : '#475569',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      boxShadow: activeSettingsTab === tab.id ? '0 10px 24px rgba(37, 99, 235, 0.22)' : 'none',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {activeSettingsTab === 'ai' ? (
+                <div
+                  style={{
+                    padding: '16px 18px',
+                    background: '#F8FAFC',
+                    border: '1px solid rgba(32, 31, 30, 0.08)',
+                    borderRadius: 14,
+                    display: 'grid',
+                    gap: 14,
+                  }}
+                >
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ color: '#201F1E', fontSize: 14, fontWeight: 800 }}>模型连接</div>
+                    <div style={{ color: '#64748B', fontSize: 12, lineHeight: 1.7 }}>
+                      这里配置 AI provider、base URL、API key 和模型名称。修改后会自动保存到本地。
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+                    <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                      Provider
+                      <select
+                        value={aiSettings.provider}
+                        onChange={(event) => setAiSettings((previous) => ({
+                          ...previous,
+                          provider: event.target.value as AiAgentSettings['provider'],
+                        }))}
+                        style={settingsInputStyle}
+                      >
+                        <option value="anthropic">Anthropic Compatible</option>
+                        <option value="openai">OpenAI Compatible</option>
+                      </select>
+                    </label>
+                    <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                      Model
+                      <input
+                        type="text"
+                        value={aiSettings.model}
+                        onChange={(event) => setAiSettings((previous) => ({ ...previous, model: event.target.value }))}
+                        placeholder="claude-3-7-sonnet / ark-code-latest"
+                        style={settingsInputStyle}
+                      />
+                    </label>
+                  </div>
+                  <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                    Base URL
+                    <input
+                      type="text"
+                      value={aiSettings.baseUrl}
+                      onChange={(event) => setAiSettings((previous) => ({ ...previous, baseUrl: event.target.value }))}
+                      placeholder="https://example.com/v1"
+                      style={settingsInputStyle}
                     />
-                  </span>
-                  {aiTestMessage}
+                  </label>
+                  <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                    API Key
+                    <input
+                      type="password"
+                      value={aiSettings.apiKey}
+                      onChange={(event) => setAiSettings((previous) => ({ ...previous, apiKey: event.target.value }))}
+                      placeholder="sk-..."
+                      style={settingsInputStyle}
+                    />
+                  </label>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: '12px 14px',
+                      borderRadius: 12,
+                      background: '#FFFFFF',
+                      border: '1px solid rgba(32, 31, 30, 0.08)',
+                    }}
+                  >
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      <div style={{ color: '#201F1E', fontSize: 13, fontWeight: 700 }}>测试连接</div>
+                      <div style={{ color: '#64748B', fontSize: 12, lineHeight: 1.6 }}>
+                        直接调用 sidecar 探测模型是否可用，立即返回协议与错误信息。
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { void handleTestAiConnection(); }}
+                      disabled={isTestingAiConnection}
+                      style={{
+                        minWidth: 112,
+                        padding: '10px 16px',
+                        borderRadius: 10,
+                        border: 'none',
+                        background: isTestingAiConnection
+                          ? '#CBD5E1'
+                          : 'linear-gradient(135deg, #0F8C72 0%, #22C983 100%)',
+                        color: '#FFFFFF',
+                        fontSize: 12,
+                        fontWeight: 800,
+                        cursor: isTestingAiConnection ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {isTestingAiConnection ? '测试中...' : '测试连接'}
+                    </button>
+                  </div>
+
+                  {aiConnectionProbeError ? (
+                    <div
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 10,
+                        background: '#FEF2F2',
+                        border: '1px solid #FECACA',
+                        color: '#B91C1C',
+                        fontSize: 12,
+                        lineHeight: 1.65,
+                      }}
+                    >
+                      {aiConnectionProbeError}
+                    </div>
+                  ) : null}
+
+                  {aiConnectionProbe ? (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                        gap: 10,
+                      }}
+                    >
+                      <InfoPill label="状态" value="连接成功" tone="success" />
+                      <InfoPill label="协议" value={aiConnectionProbe.protocol} tone="accent" />
+                      <InfoPill label="返回" value={aiConnectionProbe.preview || 'OK'} />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    padding: '16px 18px',
+                    background: '#F8FAFC',
+                    border: '1px solid rgba(32, 31, 30, 0.08)',
+                    borderRadius: 14,
+                    display: 'grid',
+                    gap: 14,
+                  }}
+                >
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ color: '#201F1E', fontSize: 14, fontWeight: 800 }}>执行与自检</div>
+                    <div style={{ color: '#64748B', fontSize: 12, lineHeight: 1.7 }}>
+                      控制 AI 生成链路的修复轮数、轨迹明细，以及自动校验的严格程度。
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+                    <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                      修复轮数
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        value={aiSettings.maxRepairRounds}
+                        onChange={(event) => setAiSettings((previous) => ({
+                          ...previous,
+                          maxRepairRounds: Math.max(0, Math.min(5, Number(event.target.value) || 0)),
+                        }))}
+                        style={settingsInputStyle}
+                      />
+                    </label>
+                    <label style={{ display: 'grid', gap: 6, fontSize: 12, color: '#605E5C' }}>
+                      Trace 级别
+                      <select
+                        value={aiSettings.traceVerbosity}
+                        onChange={(event) => setAiSettings((previous) => ({
+                          ...previous,
+                          traceVerbosity: event.target.value as AiAgentSettings['traceVerbosity'],
+                        }))}
+                        style={settingsInputStyle}
+                      >
+                        <option value="summary">Summary</option>
+                        <option value="detailed">Detailed</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div
+                    style={{
+                      padding: '12px 14px',
+                      borderRadius: 12,
+                      background: '#FFFFFF',
+                      border: '1px solid rgba(32, 31, 30, 0.08)',
+                      color: '#605E5C',
+                      fontSize: 12,
+                      lineHeight: 1.75,
+                    }}
+                  >
+                    当前链路会优先走 creative-html 生成，并执行结构校验、字段绑定校验和修复循环。修复轮数越高，自动回补越积极，但整体耗时也会更长。
+                  </div>
                 </div>
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}>
               <button
                 onClick={() => setShowSettings(false)}
                 style={{
-                  flex: 1,
-                  padding: '10px',
-                  background: '#FFFFFF',
-                  border: '1px solid rgba(32, 31, 30, 0.14)',
-                  borderRadius: 8,
-                  color: '#605E5C',
-                  fontSize: 14,
-                  cursor: 'pointer',
-                }}
-              >
-                取消
-              </button>
-              <button
-                onClick={handleSaveSettings}
-                style={{
-                  flex: 1,
-                  padding: '10px',
+                  minWidth: 108,
+                  padding: '10px 16px',
                   background: '#0F6CBD',
                   border: 'none',
                   borderRadius: 8,
@@ -7273,7 +6923,7 @@ export function App() {
                   cursor: 'pointer',
                 }}
               >
-                保存
+                关闭
               </button>
             </div>
           </div>

@@ -17,7 +17,7 @@ export function EditorCanvas() {
         {selectedComponent ? (
           <p>Selected: {selectedComponent}</p>
         ) : (
-          <p>Drag components here or use AI to generate a report</p>
+          <p>Drag components here to start building a report</p>
         )}
       </div>
     </div>

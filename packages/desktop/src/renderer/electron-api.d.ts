@@ -1,3 +1,5 @@
+import type { AiAgentSettings } from './ai/types';
+
 type PowerBiScanItem = {
   id: string;
   processId: number;
@@ -17,13 +19,14 @@ type SelectFileOptions = {
 
 interface ElectronApi {
   getApiUrl: () => Promise<string>;
+  getAgentUrl: () => Promise<string>;
+  loadAiSettings: () => Promise<AiAgentSettings>;
+  saveAiSettings: (settings: AiAgentSettings) => Promise<AiAgentSettings>;
+  openBrowserPreview: (payload: unknown) => Promise<string>;
   selectFile: (options?: SelectFileOptions) => Promise<string | null>;
   readTextFile: (filePath: string) => Promise<string | null>;
   saveFile: (defaultName: string) => Promise<string | null>;
   scanPowerBiInstances: () => Promise<PowerBiScanItem[]>;
-  getAiConversationPath: () => Promise<string>;
-  readAiConversationState: () => Promise<string | null>;
-  writeAiConversationState: (content: string) => Promise<string>;
 }
 
 declare global {

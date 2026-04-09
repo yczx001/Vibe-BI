@@ -1,0 +1,89 @@
+{
+  "assistantMessage": "Generated a parity-class boardroom editorial shipping report shell with integrated filters, coordinated sections, and real-data bindings.",
+  "reportName": "Shipping Operations Boardroom",
+  "reportDescription": "Golden parity fixture for the boardroom-editorial single-page lane.",
+  "runtimeHints": {
+    "styleFamily": "boardroom-editorial",
+    "layoutArchetype": "parity-operational-single-page",
+    "designTone": "Boardroom editorial with operational clarity",
+    "filterPlacement": "top"
+  },
+  "viewport": {
+    "width": 1920,
+    "height": 1080,
+    "mode": "fixed"
+  },
+  "theme": {
+    "name": "Boardroom Editorial",
+    "colors": {
+      "primary": "#1D3557",
+      "secondary": "#2A9D8F",
+      "background": "#F4EFE8",
+      "surface": "#FFFDF9",
+      "text": "#1F2430",
+      "textSecondary": "#6F7380",
+      "chart": ["#1D3557", "#457B9D", "#2A9D8F", "#C89B3C"]
+    },
+    "typography": {
+      "fontFamily": "\"Iowan Old Style\", \"Source Han Serif SC\", \"Microsoft YaHei UI\", serif"
+    }
+  },
+  "html": "<div class=\"page-shell boardroom-editorial\"><section class=\"filter-bar integrated-filters\" data-slot=\"filter-surface\"></section><section class=\"hero-zone\" data-slot=\"hero-zone\"></section><section class=\"kpi-belt\" data-slot=\"kpi-belt\"></section><section class=\"trend-zone\" data-slot=\"trend-zone\"></section><section class=\"ranking-zone\" data-slot=\"ranking-zone\"></section><section class=\"detail-zone\" data-slot=\"detail-zone\"></section></div>",
+  "css": ".page-shell{display:grid;gap:20px}.hero-zone,.kpi-belt,.trend-zone,.ranking-zone,.detail-zone,.filter-bar{border-radius:20px}.kpi-belt{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.trend-zone{min-height:320px}.detail-zone{min-height:280px}",
+  "js": "function deriveView(context, helpers){const reportData=context.reportData;const activeFilters=context.filters.values;return {heroMetric:reportData.heroMetric,secondaryMetrics:reportData.secondaryMetrics,primaryTrend:reportData.primaryTrend,primaryRanking:reportData.primaryRanking,primaryTable:reportData.primaryTable,filterOptions:reportData.filterOptions,activeFilters};} function renderHero(view, root, helpers){const hero=root.querySelector('.hero-zone'); if(!hero)return; helpers.clearNode(hero); hero.appendChild(helpers.createElement('div','hero-title',`累计运作天数 ${helpers.formatCompactNumber(view.heroMetric?.rawValue)}`)); hero.appendChild(helpers.createElement('div','hero-note',`当前筛选 ${Object.keys(view.activeFilters||{}).length} 个条件`));} function renderKpis(view, root, helpers){const belt=root.querySelector('.kpi-belt'); if(!belt)return; helpers.clearNode(belt); (view.secondaryMetrics||[]).slice(0,4).forEach((metric)=>{const card=helpers.createElement('div','kpi-card'); card.appendChild(helpers.createElement('div','kpi-label',metric.label)); card.appendChild(helpers.createElement('div','kpi-value',metric.formattedValue)); belt.appendChild(card);});} function renderTrend(view, root, helpers){const trend=root.querySelector('.trend-zone'); if(!trend)return; helpers.clearNode(trend); const point=view.primaryTrend?.points?.[0]; trend.appendChild(helpers.createElement('div','trend-title','月度趋势')); trend.appendChild(helpers.createElement('div','trend-copy',point?`${point.label} 运作天数 ${helpers.formatCompactNumber(point.value)}`:'暂无趋势数据'));} function renderStructure(view, root, helpers){const ranking=root.querySelector('.ranking-zone'); if(!ranking)return; helpers.clearNode(ranking); ranking.appendChild(helpers.createElement('div','ranking-title','重点船舶')); (view.primaryRanking?.points||[]).slice(0,5).forEach((point)=>{const row=helpers.createElement('button','ranking-item',`${point.label} · ${helpers.formatCompactNumber(point.value)}`); row.type='button'; row.dataset.shipValue=point.label; ranking.appendChild(row);});} function renderDetail(view, root, helpers){const detail=root.querySelector('.detail-zone'); if(!detail)return; helpers.clearNode(detail); detail.appendChild(helpers.createElement('div','detail-title','明细区')); (view.primaryTable?.rows||[]).slice(0,6).forEach((row)=>{const item=helpers.createElement('div','detail-row',`${row['船名']||'-'} · ${row['月份']||'-'} · ${helpers.formatCompactNumber(row['月运作天数_汇总'])}`); detail.appendChild(item);});} function renderFilterBar(view, root, helpers){const filterBar=root.querySelector('.filter-bar'); if(!filterBar)return; helpers.clearNode(filterBar); const button=helpers.createElement('button','filter-trigger','筛选船型'); button.type='button'; button.addEventListener('click',()=>helpers.syncCanonicalFilter('shipType','4250TEU')); filterBar.appendChild(button);} function wireInteractions(context, root, helpers){root.querySelectorAll('.ranking-item').forEach((node)=>node.addEventListener('click',()=>{helpers.updatePersistentState('boardroom-ui',{focus:node.dataset.shipValue});}));} function render(context, root, helpers){const localState=helpers.getPersistentState('boardroom-ui',{}); const view=deriveView(context, helpers); renderFilterBar(view, root, helpers); renderHero(view, root, helpers); renderKpis(view, root, helpers); renderTrend(view, root, helpers); renderStructure(view, root, helpers); renderDetail(view, root, helpers); wireInteractions(context, root, helpers); return ()=>helpers.setPersistentState('boardroom-ui', localState);}",
+  "bindings": [
+    {
+      "name": "heroMetric",
+      "kind": "metric",
+      "queryRef": "shipping-q-hero-metric",
+      "label": "Hero Metric",
+      "description": "Primary boardroom hero metric.",
+      "shapeHint": "value",
+      "fields": ["月运作天数_汇总"],
+      "recommendedFields": ["月运作天数_汇总"],
+      "structuralFields": []
+    },
+    {
+      "name": "monthlyTrend",
+      "kind": "chart",
+      "queryRef": "shipping-q-monthly-trend",
+      "label": "Monthly Trend",
+      "description": "Primary monthly operations trend.",
+      "shapeHint": "series",
+      "fields": ["月份", "月运作天数_汇总"],
+      "recommendedFields": ["月份", "月运作天数_汇总"],
+      "structuralFields": ["月份"],
+      "chartType": "line"
+    },
+    {
+      "name": "shipRanking",
+      "kind": "chart",
+      "queryRef": "shipping-q-ship-ranking",
+      "label": "Ship Ranking",
+      "description": "Primary ranking section.",
+      "shapeHint": "series",
+      "fields": ["船名", "月运作天数_汇总"],
+      "recommendedFields": ["船名", "月运作天数_汇总"],
+      "structuralFields": ["船名"],
+      "chartType": "bar",
+      "orientation": "horizontal"
+    },
+    {
+      "name": "detailTable",
+      "kind": "table",
+      "queryRef": "shipping-q-detail-table",
+      "label": "Detail Table",
+      "description": "Detail zone table.",
+      "shapeHint": "rows",
+      "fields": ["船名", "月份", "月运作天数_汇总"],
+      "recommendedFields": ["船名", "月份", "月运作天数_汇总"],
+      "structuralFields": ["船名", "月份"]
+    }
+  ],
+  "usedQueryRefs": [
+    "shipping-q-hero-metric",
+    "shipping-q-monthly-trend",
+    "shipping-q-ship-ranking",
+    "shipping-q-detail-table"
+  ]
+}

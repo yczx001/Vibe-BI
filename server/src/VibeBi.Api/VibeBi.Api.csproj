@@ -17,7 +17,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\VibeBi.Core\VibeBi.Core.csproj" />
-    <ProjectReference Include="..\VibeBi.AI\VibeBi.AI.csproj" />
   </ItemGroup>
 
 </Project>

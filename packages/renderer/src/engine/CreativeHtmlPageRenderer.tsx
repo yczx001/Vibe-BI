@@ -13,6 +13,12 @@ import { fetchQueryRows } from '../data/useQueryData';
 import { useFilters } from '../data/FilterContext';
 import { mixColors, withAlpha } from '../theme/colorUtils';
 import { resolveFieldReference } from '../utils/fieldResolution';
+import { buildCreativeReportData, type CreativeReportData } from './creativeReportData';
+import {
+  buildShippingEditorialBundle,
+  ShippingEditorialPageRenderer,
+  type ShippingSourceDataset,
+} from './ShippingEditorialPageRenderer';
 
 type DataRow = Record<string, unknown>;
 
@@ -41,10 +47,27 @@ interface CreativeDataBindingContext {
   rows: DataRow[];
 }
 
+interface CreativeQueryAnalysis {
+  columns: string[];
+  numericFields: string[];
+  categoricalFields: string[];
+  timeFields: string[];
+  primaryValueField?: string;
+  secondaryValueField?: string;
+  primaryCategoryField?: string;
+}
+
 interface CreativeScriptContext {
   report: Pick<ReportDefinition, 'id' | 'name' | 'description' | 'runtimeHints'>;
   page: Pick<PageDefinition, 'id' | 'name' | 'filters' | 'viewport'>;
   theme: ThemeDefinition;
+  artifactKey: string;
+  parity: {
+    active: boolean;
+    contractVersion: string;
+    layoutProfile: string;
+  };
+  reportData: CreativeReportData;
   filters: {
     values: Record<string, unknown>;
     definitions: PageDefinition['filters'];
@@ -65,6 +88,8 @@ const DEFAULT_HTML = `
 </section>
 `;
 
+const creativeUiStateStore = new Map<string, Record<string, unknown>>();
+
 export function CreativeHtmlPageRenderer({
   report,
   page,
@@ -81,6 +106,10 @@ export function CreativeHtmlPageRenderer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
+  const explicitParityLane = useMemo(
+    () => isExplicitParityRuntimeHints(report.runtimeHints),
+    [report.runtimeHints]
+  );
 
   const bindings = useMemo(
     () => resolveCreativeBindings(page, queries),
@@ -89,10 +118,14 @@ export function CreativeHtmlPageRenderer({
 
   useEffect(() => {
     let cancelled = false;
-    const activeQueryIds = bindings
-      .map((binding) => binding.queryRef)
-      .filter((value): value is string => Boolean(value))
-      .filter((value, index, list) => list.indexOf(value) === index);
+    const activeQueryIds = explicitParityLane
+      ? queries
+        .map((query) => query.id)
+        .filter((value, index, list) => list.indexOf(value) === index)
+      : bindings
+        .map((binding) => binding.queryRef)
+        .filter((value): value is string => Boolean(value))
+        .filter((value, index, list) => list.indexOf(value) === index);
 
     if (activeQueryIds.length === 0) {
       setRowsByQuery({});
@@ -137,7 +170,23 @@ export function CreativeHtmlPageRenderer({
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, bindings, dataSource, queries]);
+  }, [apiBaseUrl, bindings, dataSource, explicitParityLane, queries]);
+
+  const reportData = useMemo(
+    () => buildCreativeReportData(queries, rowsByQuery, {
+      styleFamily: report.runtimeHints?.styleFamily || null,
+      layoutArchetype: report.runtimeHints?.layoutArchetype || null,
+    }),
+    [queries, report.runtimeHints?.layoutArchetype, report.runtimeHints?.styleFamily, rowsByQuery]
+  );
+  const parityShippingBundle = useMemo(() => {
+    if (!reportData.explicitParityLane) {
+      return null;
+    }
+
+    const datasets = buildParityShippingDatasets(queries, rowsByQuery, bindings);
+    return buildShippingEditorialBundle(report, datasets);
+  }, [bindings, queries, report, reportData.explicitParityLane, rowsByQuery]);
 
   const scriptContext = useMemo<CreativeScriptContext>(() => ({
     report: {
@@ -153,6 +202,13 @@ export function CreativeHtmlPageRenderer({
       viewport: page.viewport,
     },
     theme,
+    artifactKey: createCreativeArtifactKey(report.id, page.id),
+    parity: {
+      active: reportData.explicitParityLane,
+      contractVersion: reportData.contractVersion,
+      layoutProfile: reportData.layoutProfile,
+    },
+    reportData,
     filters: {
       values: filters,
       definitions: page.filters,
@@ -163,7 +219,7 @@ export function CreativeHtmlPageRenderer({
     data: buildCreativeDataContext(bindings, rowsByQuery),
     queries: queries.map((query) => ({ id: query.id, name: query.name })),
     rowsByQuery,
-  }), [bindings, clearAllFilters, clearFilter, filters, page.filters, page.id, page.name, page.viewport, queries, report.description, report.id, report.name, report.runtimeHints, rowsByQuery, setFilter, theme]);
+  }), [bindings, clearAllFilters, clearFilter, filters, page.filters, page.id, page.name, page.viewport, queries, report.description, report.id, report.name, report.runtimeHints, reportData, rowsByQuery, setFilter, theme]);
 
   const renderedDocument = useMemo(() => {
     const baseHtml = pickCreativeMarkup(page);
@@ -194,31 +250,106 @@ export function CreativeHtmlPageRenderer({
     }
 
     const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
-    if (scriptCleanupRef.current) {
-      scriptCleanupRef.current();
-      scriptCleanupRef.current = null;
-    }
-
-    shadowRoot.innerHTML = renderedDocument;
-    setScriptError(null);
     const script = page.js || page.script || '';
-    if (script.trim()) {
-      const result = executeCreativePageScript(shadowRoot, script, scriptContext);
-      scriptCleanupRef.current = result.cleanup;
-      setScriptError(result.error);
-    }
+    let cancelled = false;
+    let rafPrimary = 0;
+    let rafSecondary = 0;
+    let resizeTimer: number | undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    let lastObservedWidth = -1;
+    let lastObservedHeight = -1;
 
-    return () => {
+    const disposeScript = () => {
       if (scriptCleanupRef.current) {
         scriptCleanupRef.current();
         scriptCleanupRef.current = null;
       }
+    };
+
+    const renderAndRunScript = () => {
+      if (cancelled) {
+        return;
+      }
+
+      disposeScript();
+      shadowRoot.innerHTML = renderedDocument;
+      setScriptError(null);
+
+      if (!script.trim()) {
+        return;
+      }
+
+      const result = executeCreativePageScript(shadowRoot, script, scriptContext);
+      scriptCleanupRef.current = result.cleanup;
+      setScriptError(result.error);
+    };
+
+    const scheduleRender = () => {
+      window.cancelAnimationFrame(rafPrimary);
+      window.cancelAnimationFrame(rafSecondary);
+      rafPrimary = window.requestAnimationFrame(() => {
+        rafSecondary = window.requestAnimationFrame(() => {
+          renderAndRunScript();
+        });
+      });
+    };
+
+    scheduleRender();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver((entries) => {
+        const rect = entries[0]?.contentRect;
+        const nextWidth = Math.round(rect?.width ?? host.clientWidth);
+        const nextHeight = Math.round(rect?.height ?? host.clientHeight);
+
+        if (nextWidth <= 0 || nextHeight <= 0) {
+          return;
+        }
+
+        if (Math.abs(nextWidth - lastObservedWidth) <= 1 && Math.abs(nextHeight - lastObservedHeight) <= 1) {
+          return;
+        }
+
+        lastObservedWidth = nextWidth;
+        lastObservedHeight = nextHeight;
+
+        if (resizeTimer !== undefined) {
+          window.clearTimeout(resizeTimer);
+        }
+        resizeTimer = window.setTimeout(() => {
+          scheduleRender();
+        }, 48);
+      });
+      resizeObserver.observe(host);
+    }
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(rafPrimary);
+      window.cancelAnimationFrame(rafSecondary);
+      if (resizeTimer !== undefined) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeObserver?.disconnect();
+      disposeScript();
     };
   }, [page.js, page.script, renderedDocument, scriptContext]);
 
   const background = theme.colors.background || '#0b1020';
   const surface = theme.colors.surface || '#101826';
   const shellHeight = viewportMode === 'document' ? 'auto' : '100%';
+
+  if (parityShippingBundle) {
+    return (
+      <ShippingEditorialPageRenderer
+        theme={theme}
+        bundle={parityShippingBundle}
+        pageFilters={page.filters}
+        filterPlacement={report.runtimeHints?.filterPlacement}
+        viewportMode={viewportMode}
+      />
+    );
+  }
 
   return (
     <div
@@ -332,6 +463,105 @@ function buildCreativeDataContext(
   return context;
 }
 
+function buildParityShippingDatasets(
+  queries: QueryDefinition[],
+  rowsByQuery: Record<string, DataRow[]>,
+  bindings: FreeformBindingDefinition[],
+): ShippingSourceDataset[] {
+  const bindingByQueryRef = new Map(
+    bindings
+      .filter((binding) => binding.queryRef)
+      .map((binding) => [binding.queryRef as string, binding]),
+  );
+
+  return queries
+    .map((query) => {
+      const binding = bindingByQueryRef.get(query.id);
+      const rows = rowsByQuery[query.id] || [];
+      const title = binding?.label || binding?.description || query.name || binding?.name || query.id;
+      return {
+        component: { id: binding?.name || query.id },
+        query: { id: query.id, name: query.name },
+        rows,
+        analysis: analyzeCreativeRows(rows),
+        title,
+        chartType: binding?.chartType || inferParityChartType(title, binding?.kind),
+        orientation: binding?.orientation || 'vertical',
+      } satisfies ShippingSourceDataset;
+    })
+    .filter((dataset) => dataset.rows.length > 0);
+}
+
+function analyzeCreativeRows(rows: DataRow[]): CreativeQueryAnalysis {
+  const columns = Object.keys(rows[0] || {}).filter((column) => column !== '__rowIndex');
+  const numericFields: string[] = [];
+  const categoricalFields: string[] = [];
+  const timeFields: string[] = [];
+
+  columns.forEach((column) => {
+    const values = rows
+      .map((row) => row[column])
+      .filter((value) => value !== null && value !== undefined && value !== '');
+
+    if (values.length === 0) {
+      categoricalFields.push(column);
+      return;
+    }
+
+    const numericVotes = values.filter(isNumericLike).length;
+    const timeVotes = values.filter((value) => isTimeLike(column, value)).length;
+
+    if (timeVotes >= Math.max(1, Math.floor(values.length * 0.5))) {
+      timeFields.push(column);
+    } else if (numericVotes >= Math.max(1, Math.floor(values.length * 0.7))) {
+      numericFields.push(column);
+    } else {
+      categoricalFields.push(column);
+    }
+  });
+
+  const primaryValueField = numericFields.find((field) => !/columnindex|rowindex|sortby/i.test(field))
+    || numericFields[0];
+  const secondaryValueField = numericFields.find((field) => field !== primaryValueField);
+  const primaryCategoryField = timeFields[0]
+    || categoricalFields.find((field) => !/rowindex|level/i.test(field))
+    || categoricalFields[0];
+
+  return {
+    columns,
+    numericFields,
+    categoricalFields,
+    timeFields,
+    primaryValueField,
+    secondaryValueField,
+    primaryCategoryField,
+  };
+}
+
+function inferParityChartType(title: string, kind?: FreeformBindingDefinition['kind']): string {
+  if (kind === 'table') {
+    return 'table';
+  }
+  if (kind === 'metric' || kind === 'value') {
+    return 'kpi-card';
+  }
+  if (/占比|构成|结构|share|mix/i.test(title)) {
+    return 'pie';
+  }
+  if (/趋势|年月|月份|trend|time|year|month/i.test(title)) {
+    return 'line';
+  }
+  return 'bar';
+}
+
+function isExplicitParityRuntimeHints(
+  runtimeHints: Pick<ReportDefinition, 'runtimeHints'>['runtimeHints'],
+): boolean {
+  const styleFamily = String(runtimeHints?.styleFamily || '').trim().toLowerCase();
+  const layoutArchetype = String(runtimeHints?.layoutArchetype || '').trim().toLowerCase();
+  return styleFamily === 'boardroom-editorial' && layoutArchetype === 'parity-operational-single-page';
+}
+
 function buildBindingSchema(binding: FreeformBindingDefinition, rows: DataRow[]): BindingFieldSchema[] {
   const knownFields = getAvailableFields(rows, [
     ...(binding.fields || []),
@@ -399,6 +629,36 @@ function getPrioritizedFieldList(
     .filter((field) => Boolean(field[flag]))
     .map((field) => field.name);
   return [...new Set(explicit.length > 0 ? explicit : fallback)];
+}
+
+function isNumericLike(value: unknown): boolean {
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const trimmed = value.replace(/,/g, '').trim();
+  return trimmed.length > 0 && Number.isFinite(Number(trimmed));
+}
+
+function isTimeLike(field: string, value: unknown): boolean {
+  if (/date|time|month|year|季度|月份|年月|日期|时间/i.test(field)) {
+    return true;
+  }
+
+  if (typeof value === 'number') {
+    return value >= 1900 && value <= 2100;
+  }
+
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  return /^(\d{4}[-/]\d{1,2}([-/]\d{1,2})?|\d{1,2}月|\d{4}年|\d{4}年\d{1,2}月)$/i.test(trimmed);
 }
 
 function pickCreativeMarkup(page: PageDefinition): string {
@@ -527,12 +787,119 @@ function executeCreativePageScript(
   script: string,
   context: CreativeScriptContext,
 ): { cleanup: (() => void) | null; error: string | null } {
+  const persistentUiState = getOrCreatePersistentUiState(context.artifactKey);
   const helpers = {
     formatValue,
+    formatNumber: (value: unknown, decimals = 0) => {
+      const numericValue = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(numericValue)) {
+        return '-';
+      }
+      return numericValue.toLocaleString('zh-CN', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });
+    },
+    formatCompactNumber: (value: unknown) => {
+      const numericValue = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(numericValue)) {
+        return '-';
+      }
+      if (Math.abs(numericValue) >= 100000000) {
+        return `${(numericValue / 100000000).toFixed(2)}亿`;
+      }
+      if (Math.abs(numericValue) >= 10000) {
+        return `${(numericValue / 10000).toFixed(1)}万`;
+      }
+      return numericValue.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+    },
     escapeHtml,
     cleanFieldLabel,
     querySelector: (selector: string) => root.querySelector(selector),
     querySelectorAll: (selector: string) => Array.from(root.querySelectorAll(selector)),
+    dataSet: (sourceOrAlias: unknown, aliasOrQueryRef?: string) => {
+      const lookupKey = typeof aliasOrQueryRef === 'string'
+        ? aliasOrQueryRef
+        : typeof sourceOrAlias === 'string'
+          ? sourceOrAlias
+          : undefined;
+      if (!lookupKey) {
+        return undefined;
+      }
+      return context.data[lookupKey] || Object.values(context.data).find((entry) => entry.queryRef === lookupKey);
+    },
+    createElement: (tagName: string, className?: string, textContent?: string) => {
+      const element = root.ownerDocument.createElement(tagName);
+      if (className) {
+        element.className = className;
+      }
+      if (textContent !== undefined) {
+        element.textContent = textContent;
+      }
+      return element;
+    },
+    createSvgElement: (tagName: string) => root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', tagName),
+    clearNode: (target: Element | null | undefined) => {
+      if (!target) {
+        return;
+      }
+      target.replaceChildren();
+    },
+    setText: (target: Element | null | undefined, value: unknown) => {
+      if (!target) {
+        return;
+      }
+      target.textContent = value === null || value === undefined ? '' : String(value);
+    },
+    setHtml: (target: Element | null | undefined, value: string) => {
+      if (!target) {
+        return;
+      }
+      target.innerHTML = sanitizeHtml(value);
+    },
+    getPersistentState: <T = unknown>(key: string, fallbackValue?: T): T | undefined => {
+      if (!key) {
+        return fallbackValue;
+      }
+      const value = persistentUiState[key];
+      return (value === undefined ? fallbackValue : value) as T | undefined;
+    },
+    setPersistentState: (key: string, value: unknown) => {
+      if (!key) {
+        return;
+      }
+      persistentUiState[key] = clonePersistentValue(value);
+    },
+    updatePersistentState: (
+      key: string,
+      updater: ((currentValue: unknown) => unknown) | Record<string, unknown>,
+    ) => {
+      if (!key) {
+        return undefined;
+      }
+      const currentValue = persistentUiState[key];
+      const nextValue = typeof updater === 'function'
+        ? updater(currentValue)
+        : {
+          ...(isPlainObject(currentValue) ? currentValue : {}),
+          ...updater,
+        };
+      persistentUiState[key] = clonePersistentValue(nextValue);
+      return persistentUiState[key];
+    },
+    clearPersistentState: (key?: string) => {
+      if (!key) {
+        Object.keys(persistentUiState).forEach((entryKey) => {
+          delete persistentUiState[entryKey];
+        });
+        return;
+      }
+      delete persistentUiState[key];
+    },
+    getCanonicalFilterValue: (filterId: string) => context.filters.values[filterId],
+    syncCanonicalFilter: (filterId: string, value: unknown) => {
+      context.filters.set(filterId, value);
+    },
     groupRows: (rows: DataRow[], field: string) => rows.reduce<Record<string, DataRow[]>>((acc, row) => {
       const key = String(row[field] ?? '');
       if (!acc[key]) {
@@ -690,10 +1057,24 @@ function createShadowWindowProxy(
   context: CreativeScriptContext,
   helpers: {
     formatValue: typeof formatValue;
+    formatNumber: (value: unknown, decimals?: number) => string;
+    formatCompactNumber: (value: unknown) => string;
     escapeHtml: typeof escapeHtml;
     cleanFieldLabel: typeof cleanFieldLabel;
     querySelector: (selector: string) => Element | null;
     querySelectorAll: (selector: string) => Element[];
+    dataSet: (sourceOrAlias: unknown, aliasOrQueryRef?: string) => CreativeDataBindingContext | undefined;
+    createElement: (tagName: string, className?: string, textContent?: string) => HTMLElement;
+    createSvgElement: (tagName: string) => SVGElement;
+    clearNode: (target: Element | null | undefined) => void;
+    setText: (target: Element | null | undefined, value: unknown) => void;
+    setHtml: (target: Element | null | undefined, value: string) => void;
+    getPersistentState: <T = unknown>(key: string, fallbackValue?: T) => T | undefined;
+    setPersistentState: (key: string, value: unknown) => void;
+    updatePersistentState: (key: string, updater: ((currentValue: unknown) => unknown) | Record<string, unknown>) => unknown;
+    clearPersistentState: (key?: string) => void;
+    getCanonicalFilterValue: (filterId: string) => unknown;
+    syncCanonicalFilter: (filterId: string, value: unknown) => void;
     groupRows: (rows: DataRow[], field: string) => Record<string, DataRow[]>;
     sumField: (rows: DataRow[], field: string) => number;
     averageField: (rows: DataRow[], field: string) => number;
@@ -719,6 +1100,8 @@ function createShadowWindowProxy(
     context,
     helpers,
     theme: context.theme,
+    artifactKey: context.artifactKey,
+    reportData: context.reportData,
     filters: context.filters,
     queries: context.queries,
     rowsByQuery: context.rowsByQuery,
@@ -933,4 +1316,41 @@ function normalizeFieldToken(value: string): string {
     .replace(/['"`]/g, '')
     .replace(/[[\]()（）{}]/g, '')
     .replace(/[_\-\s./\\:：|]+/g, '');
+}
+
+function createCreativeArtifactKey(
+  reportId: string,
+  pageId: string,
+): string {
+  // Keep UI state stable for the same generated artifact across filter-driven rerenders.
+  return `${reportId}::${pageId}`;
+}
+
+function getOrCreatePersistentUiState(artifactKey: string): Record<string, unknown> {
+  const existing = creativeUiStateStore.get(artifactKey);
+  if (existing) {
+    return existing;
+  }
+  const next: Record<string, unknown> = {};
+  creativeUiStateStore.set(artifactKey, next);
+  return next;
+}
+
+function clonePersistentValue(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => clonePersistentValue(entry));
+  }
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, clonePersistentValue(entryValue)])
+    );
+  }
+  return value;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

@@ -62,6 +62,7 @@ export interface BrowserPreviewPayload {
   dataSource: DataSourceConfig;
   apiBaseUrl?: string;
   chartRendererMode?: 'html' | 'echarts';
+  prefetchedRowsByQuery?: Record<string, QueryResult>;
 }
 
 export type WorkspaceMode = 'report' | 'data' | 'git';

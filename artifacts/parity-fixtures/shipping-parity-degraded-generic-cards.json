@@ -1,0 +1,50 @@
+{
+  "assistantMessage": "Generated a generic creative-html dashboard shell.",
+  "reportName": "Shipping Generic Cards",
+  "reportDescription": "Degraded parity fixture that should fail parity-class checks.",
+  "runtimeHints": {
+    "styleFamily": "boardroom-editorial",
+    "layoutArchetype": "parity-operational-single-page",
+    "designTone": "Generic dashboard",
+    "filterPlacement": "top"
+  },
+  "viewport": {
+    "width": 1920,
+    "height": 1080,
+    "mode": "fixed"
+  },
+  "theme": {
+    "name": "Generic Cards",
+    "colors": {
+      "primary": "#2563EB",
+      "secondary": "#14B8A6",
+      "background": "#FFFFFF",
+      "surface": "#F8FAFC",
+      "text": "#111827",
+      "textSecondary": "#6B7280",
+      "chart": ["#2563EB", "#14B8A6", "#F59E0B"]
+    },
+    "typography": {
+      "fontFamily": "\"Segoe UI\", sans-serif"
+    }
+  },
+  "html": "<div class=\"dashboard-grid\"><div class=\"card\">Metric 1</div><div class=\"card\">Metric 2</div><div class=\"card\">Metric 3</div><div class=\"card\">Metric 4</div></div>",
+  "css": ".dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.card{padding:16px;border:1px solid #E5E7EB;border-radius:12px}",
+  "js": "function render(context, root, helpers){const metric=context.reportData.heroMetric; root.querySelectorAll('.card').forEach((node)=>{node.textContent=metric?.formattedValue || '-';});}",
+  "bindings": [
+    {
+      "name": "heroMetric",
+      "kind": "metric",
+      "queryRef": "shipping-q-hero-metric",
+      "label": "Hero Metric",
+      "description": "Single metric only.",
+      "shapeHint": "value",
+      "fields": ["月运作天数_汇总"],
+      "recommendedFields": ["月运作天数_汇总"],
+      "structuralFields": []
+    }
+  ],
+  "usedQueryRefs": [
+    "shipping-q-hero-metric"
+  ]
+}

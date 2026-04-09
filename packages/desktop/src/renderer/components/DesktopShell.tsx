@@ -697,11 +697,11 @@ export function WorkspaceWelcome({
     {
       badge: '03',
       icon: 'sparkle' as const,
-      title: 'AI 生成',
+      title: '报表工作区',
       subtitle: canGenerate
-        ? '可生成报表。'
+        ? '可进入右侧对话面板。'
         : '完成前两步后可用。',
-      actionLabel: canOpenAi ? '已完成' : '生成',
+      actionLabel: canOpenAi ? '已完成' : '打开',
       onClick: onGenerate,
       completed: canOpenAi,
       enabled: canGenerate,
@@ -710,10 +710,10 @@ export function WorkspaceWelcome({
     {
       badge: '04',
       icon: 'message' as const,
-      title: 'AI 助手',
+      title: '对话面板',
       subtitle: canOpenAi
-        ? '可继续对话调整。'
-        : '生成报表后可用。',
+        ? '可打开右侧对话区。'
+        : '进入工作区后可用。',
       actionLabel: '打开',
       onClick: onOpenAi,
       completed: false,
